@@ -6,7 +6,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 use crate::types::photo_sizes::{PhotoSize, VecExt};
-use crate::Client;
 use chrono::{DateTime, Utc};
 use grammers_tl_types as tl;
 use std::fmt::Debug;
@@ -14,13 +13,11 @@ use std::fmt::Debug;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Photo {
     pub raw: tl::types::MessageMediaPhoto,
-    client: Client,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub raw: tl::types::MessageMediaDocument,
-    client: Client,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,19 +86,18 @@ pub enum Media {
 }
 
 impl Photo {
-    pub fn from_raw(photo: tl::enums::Photo, client: Client) -> Self {
+    pub fn from_raw(photo: tl::enums::Photo) -> Self {
         Self {
             raw: tl::types::MessageMediaPhoto {
                 spoiler: false,
                 photo: Some(photo),
                 ttl_seconds: None,
             },
-            client,
         }
     }
 
-    pub fn from_raw_media(photo: tl::types::MessageMediaPhoto, client: Client) -> Self {
-        Self { raw: photo, client }
+    pub fn from_raw_media(photo: tl::types::MessageMediaPhoto) -> Self {
+        Self { raw: photo }
     }
 
     pub fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
@@ -155,6 +151,15 @@ impl Photo {
         }
     }
 
+    /// The size of the photo.
+    /// returns 0 if unable to get the size.
+    pub fn size(&self) -> i64 {
+        match self.thumbs().largest() {
+            Some(thumb) => thumb.size() as i64,
+            None => 0,
+        }
+    }
+
     /// Get photo thumbs.
     ///
     /// Since Telegram doesn't store the original photo, it can be presented in different sizes
@@ -178,7 +183,7 @@ impl Photo {
             P::Photo(photo) => photo
                 .sizes
                 .iter()
-                .map(|x| PhotoSize::make_from(x, photo, self.client.clone()))
+                .map(|x| PhotoSize::make_from(x, photo))
                 .collect(),
         }
     }
@@ -195,11 +200,8 @@ impl Photo {
 }
 
 impl Document {
-    pub fn from_raw_media(document: tl::types::MessageMediaDocument, client: Client) -> Self {
-        Self {
-            raw: document,
-            client,
-        }
+    pub fn from_raw_media(document: tl::types::MessageMediaDocument) -> Self {
+        Self { raw: document }
     }
 
     pub fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
@@ -293,6 +295,28 @@ impl Document {
         match self.raw.document.as_ref() {
             Some(tl::enums::Document::Document(d)) => d.size,
             _ => 0,
+        }
+    }
+
+    /// Get document thumbs.
+    /// <https://core.telegram.org/api/files#image-thumbnail-types>
+    pub fn thumbs(&self) -> Vec<PhotoSize> {
+        use tl::enums::Document as D;
+
+        let document = match self.raw.document.as_ref() {
+            Some(document) => document,
+            None => return vec![],
+        };
+
+        match document {
+            D::Empty(_) => vec![],
+            D::Document(document) => match &document.thumbs {
+                Some(thumbs) => thumbs
+                    .iter()
+                    .map(|x| PhotoSize::make_from_document(x, document))
+                    .collect(),
+                None => vec![],
+            },
         }
     }
 
@@ -702,23 +726,24 @@ impl Uploaded {
         match &self.raw {
             tl::enums::InputFile::File(f) => f.name.as_ref(),
             tl::enums::InputFile::Big(f) => f.name.as_ref(),
+            tl::enums::InputFile::StoryDocument(_) => "",
         }
     }
 }
 
 impl Media {
-    pub fn from_raw(media: tl::enums::MessageMedia, client: Client) -> Option<Self> {
+    pub fn from_raw(media: tl::enums::MessageMedia) -> Option<Self> {
         use tl::enums::MessageMedia as M;
 
         // TODO implement the rest
         match media {
             M::Empty => None,
-            M::Photo(photo) => Some(Self::Photo(Photo::from_raw_media(photo, client))),
+            M::Photo(photo) => Some(Self::Photo(Photo::from_raw_media(photo))),
             M::Geo(geo) => Geo::from_raw_media(geo).map(Self::Geo),
             M::Contact(contact) => Some(Self::Contact(Contact::from_raw_media(contact))),
             M::Unsupported => None,
             M::Document(document) => {
-                let document = Document::from_raw_media(document, client);
+                let document = Document::from_raw_media(document);
                 Some(if let Some(sticker) = Sticker::from_document(&document) {
                     Self::Sticker(sticker)
                 } else {

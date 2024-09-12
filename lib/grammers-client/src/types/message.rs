@@ -7,6 +7,7 @@
 // except according to those terms.
 #[cfg(any(feature = "markdown", feature = "html"))]
 use crate::parsers;
+use crate::types::reactions::InputReactions;
 use crate::types::{Downloadable, InputMessage, Media, Photo};
 use crate::utils;
 use crate::ChatMap;
@@ -39,14 +40,14 @@ pub struct Message {
     // server response contains a lot of chats, and some might be related to deep layers of
     // a message action for instance. Keeping the entire set like this allows for cheaper clones
     // and moves, and saves us from worrying about picking out all the chats we care about.
-    pub(crate) chats: Arc<types::ChatMap>,
+    pub(crate) chats: Arc<ChatMap>,
 }
 
 impl Message {
     pub fn from_raw(
         client: &Client,
         message: tl::enums::Message,
-        chats: &Arc<types::ChatMap>,
+        chats: &Arc<ChatMap>,
     ) -> Option<Self> {
         match message {
             // Don't even bother to expose empty messages to the user, even if they have an ID.
@@ -123,7 +124,7 @@ impl Message {
                 edit_hide: false,
                 pinned: false,
                 noforwards: false, // TODO true if channel has noforwads?
-                invert_media: false,
+                invert_media: input.invert_media,
                 id: updates.id,
                 from_id: None, // TODO self
                 from_boosts_applied: None,
@@ -337,10 +338,7 @@ impl Message {
     /// This not only includes photos or videos, but also contacts, polls, documents, locations
     /// and many other types.
     pub fn media(&self) -> Option<types::Media> {
-        self.raw
-            .media
-            .clone()
-            .and_then(|x| Media::from_raw(x, self.client.clone()))
+        self.raw.media.clone().and_then(|x| Media::from_raw(x))
     }
 
     /// If the message has a reply markup (which can happen for messages produced by bots),
@@ -378,6 +376,50 @@ impl Message {
                 Some(replies.replies)
             }
         }
+    }
+
+    /// React to this message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn f(message: grammers_client::types::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// message.react("👍").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Make animation big & Add to recent
+    ///
+    /// ```
+    /// # async fn f(message: grammers_client::types::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_client::types::InputReactions;
+    ///
+    /// let reactions = InputReactions::emoticon("🤯").big().add_to_recent();
+    ///
+    /// message.react(reactions).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Remove reactions
+    ///
+    /// ```
+    /// # async fn f(message: grammers_client::types::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_client::types::InputReactions;
+    ///
+    /// message.react(InputReactions::remove()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn react<R: Into<InputReactions>>(
+        &self,
+        reactions: R,
+    ) -> Result<(), InvocationError> {
+        self.client
+            .send_reactions(self.chat(), self.id(), reactions)
+            .await?;
+        Ok(())
     }
 
     /// How many reactions does this message have, when applicable.

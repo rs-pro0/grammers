@@ -7,23 +7,15 @@
 // except according to those terms.
 
 //! Methods related to sending messages.
-use crate::types::{IterBuffer, Message};
+use crate::types::{InputReactions, IterBuffer, Message};
 use crate::utils::{generate_random_id, generate_random_ids};
 use crate::{types, ChatMap, Client};
 use chrono::{DateTime, FixedOffset};
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
 use grammers_session::PackedChat;
 use grammers_tl_types as tl;
-use grammers_tl_types::enums::InputPeer;
 use std::collections::HashMap;
-
-fn get_message_id(message: &tl::enums::Message) -> i32 {
-    match message {
-        tl::enums::Message::Empty(m) => m.id,
-        tl::enums::Message::Message(m) => m.id,
-        tl::enums::Message::Service(m) => m.id,
-    }
-}
+use tl::enums::InputPeer;
 
 fn map_random_ids_to_messages(
     client: &Client,
@@ -150,12 +142,12 @@ impl<R: tl::RemoteCall<Return = tl::enums::messages::Messages>> IterBuffer<R, Me
                 // If the highest fetched message ID is lower than or equal to the limit,
                 // there can't be more messages after (highest ID - limit), because the
                 // absolute lowest message ID is 1.
-                self.last_chunk = m.messages.is_empty() || get_message_id(&m.messages[0]) <= limit;
+                self.last_chunk = m.messages.is_empty() || m.messages[0].id() <= limit;
                 self.total = Some(m.count as usize);
                 (m.messages, m.users, m.chats, m.next_rate)
             }
             Messages::ChannelMessages(m) => {
-                self.last_chunk = m.messages.is_empty() || get_message_id(&m.messages[0]) <= limit;
+                self.last_chunk = m.messages.is_empty() || m.messages[0].id() <= limit;
                 self.total = Some(m.count as usize);
                 (m.messages, m.users, m.chats, None)
             }
@@ -505,7 +497,7 @@ impl Client {
                 send_as: None,
                 noforwards: false,
                 update_stickersets_order: false,
-                invert_media: false,
+                invert_media: message.invert_media,
                 quick_reply_shortcut: None,
                 effect: None,
             })
@@ -536,7 +528,7 @@ impl Client {
                 send_as: None,
                 noforwards: false,
                 update_stickersets_order: false,
-                invert_media: false,
+                invert_media: message.invert_media,
                 quick_reply_shortcut: None,
                 effect: None,
             })
@@ -583,7 +575,7 @@ impl Client {
         let entities = parse_mention_entities(self, new_message.entities);
         self.invoke(&tl::functions::messages::EditMessage {
             no_webpage: !new_message.link_preview,
-            invert_media: false,
+            invert_media: new_message.invert_media,
             peer: chat.into().to_input_peer(),
             id: message_id,
             message: Some(new_message.text),
@@ -1022,6 +1014,67 @@ impl Client {
             top_msg_id: None,
         })
         .await?;
+        Ok(())
+    }
+
+    /// Send reaction.
+    ///
+    /// # Examples
+    ///
+    /// Via emoticon
+    ///
+    /// ```
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let message_id = 123;
+    ///
+    /// client.send_reactions(&chat, message_id, "👍").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Make animation big & Add to recent
+    ///
+    /// ```
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_client::types::InputReactions;
+    ///
+    /// let message_id = 123;
+    /// let reactions = InputReactions::emoticon("🤯").big().add_to_recent();
+    ///
+    /// client.send_reactions(&chat, message_id, reactions).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Remove reactions
+    ///
+    /// ```
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_client::types::InputReactions;
+    ///
+    /// let message_id = 123;
+    ///
+    /// client.send_reactions(&chat, message_id, InputReactions::remove()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_reactions<C: Into<PackedChat>, R: Into<InputReactions>>(
+        &self,
+        chat: C,
+        message_id: i32,
+        reactions: R,
+    ) -> Result<(), InvocationError> {
+        let reactions = reactions.into();
+
+        self.invoke(&tl::functions::messages::SendReaction {
+            big: reactions.big,
+            add_to_recent: reactions.add_to_recent,
+            peer: chat.into().to_input_peer(),
+            msg_id: message_id,
+            reaction: Some(reactions.reactions),
+        })
+        .await?;
+
         Ok(())
     }
 }

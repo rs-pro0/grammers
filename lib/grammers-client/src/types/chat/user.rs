@@ -100,6 +100,8 @@ impl User {
                     stories_hidden: false,
                     stories_unavailable: true,
                     contact_require_premium: false,
+                    bot_business: false,
+                    bot_has_main_app: false,
                     id: empty.id,
                     access_hash: None,
                     first_name: None,
@@ -117,7 +119,7 @@ impl User {
                     stories_max_id: None,
                     color: None,
                     profile_color: None,
-                    bot_business: false,
+                    bot_active_users: None,
                 },
                 tl::enums::User::User(user) => user,
             },
@@ -194,6 +196,26 @@ impl User {
     /// as https://t.me/username.
     pub fn username(&self) -> Option<&str> {
         self.raw.username.as_deref()
+    }
+
+    /// Return collectible usernames of this chat, if any.
+    ///
+    /// The returned usernames do not contain the "@" prefix.
+    ///
+    /// Outside of the application, people may link to this user with one of its username, such
+    /// as https://t.me/username.
+    pub fn usernames(&self) -> Vec<&str> {
+        self.raw
+            .usernames
+            .as_deref()
+            .map_or(Vec::new(), |usernames| {
+                usernames
+                    .iter()
+                    .map(|username| match username {
+                        tl::enums::Username::Username(username) => username.username.as_ref(),
+                    })
+                    .collect()
+            })
     }
 
     /// Return the phone number of this user, if they are not a bot and their privacy settings
