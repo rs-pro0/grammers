@@ -137,7 +137,7 @@ struct Request {
     result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct MsgIdPair {
     msg_id: MsgId,
     container_msg_id: MsgId,
@@ -444,7 +444,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         if let Some(container_msg_id) = self.mtp.finalize(&mut self.write_buffer) {
             for request in self.requests.iter_mut() {
                 match request.state {
-                    RequestState::Serialized(mut pair) => {
+                    RequestState::Serialized(ref mut pair) => {
                         pair.container_msg_id = container_msg_id;
                     }
                     RequestState::NotSerialized | RequestState::Sent(..) => {}
@@ -515,11 +515,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         self.write_buffer.clear();
         self.write_head = 0;
         for req in self.requests.iter_mut() {
-            match req.state {
+            match &req.state {
                 RequestState::NotSerialized | RequestState::Sent(_) => {}
                 RequestState::Serialized(pair) => {
                     debug!("sent request with {:?}", pair);
-                    req.state = RequestState::Sent(pair);
+                    req.state = RequestState::Sent(pair.clone());
                 }
             }
         }
@@ -572,7 +572,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                             .iter_mut()
                             .for_each(|r| r.state = RequestState::NotSerialized);
 
-                        return Ok(Vec::new());
+                        // We'll return a TooLong update to signal to the client
+                        // that it needs to call getDifference and query the server
+                        // for new updates again.
+                        return Ok(vec![tl::enums::Updates::TooLong]);
                     }
                     Err(e) => ReadError::from(e),
                 }
@@ -691,7 +694,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     fn process_bad_message(&mut self, bad_msg: BadMessage) {
         for i in (0..self.requests.len()).rev() {
-            match self.requests[i].state {
+            match &self.requests[i].state {
                 RequestState::Serialized(pair)
                     if pair.msg_id == bad_msg.msg_id || pair.container_msg_id == bad_msg.msg_id =>
                 {
@@ -754,7 +757,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     fn pop_request(&mut self, msg_id: MsgId) -> Option<Request> {
         for i in 0..self.requests.len() {
-            match self.requests[i].state {
+            match &self.requests[i].state {
                 RequestState::Serialized(pair) if pair.msg_id == msg_id => {
                     panic!("got response {msg_id:?} for unsent request {pair:?}");
                 }
