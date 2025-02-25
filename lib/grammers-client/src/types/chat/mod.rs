@@ -105,17 +105,16 @@ impl Chat {
 
     pub(crate) fn unpack(packed: PackedChat) -> Self {
         match packed.ty {
-            PackedType::User => {
-                let mut user = User::from_raw(tl::types::UserEmpty { id: packed.id }.into());
-                user.raw.access_hash = packed.access_hash;
-                Chat::User(user)
-            }
-            PackedType::Bot => {
-                let mut user = User::from_raw(tl::types::UserEmpty { id: packed.id }.into());
-                user.raw.access_hash = packed.access_hash;
-                user.raw.bot = true;
-                Chat::User(user)
-            }
+            PackedType::User => Chat::User(User::empty_with_hash_and_bot(
+                packed.id,
+                packed.access_hash,
+                false,
+            )),
+            PackedType::Bot => Chat::User(User::empty_with_hash_and_bot(
+                packed.id,
+                packed.access_hash,
+                true,
+            )),
             PackedType::Chat => Chat::Group(Group::from_raw(
                 tl::types::ChatEmpty { id: packed.id }.into(),
             )),
@@ -180,9 +179,12 @@ impl Chat {
     // is missing).
     pub(crate) fn get_min_hash_ref(&mut self) -> Option<(&mut bool, &mut i64)> {
         match self {
-            Self::User(user) => match (&mut user.raw.min, user.raw.access_hash.as_mut()) {
-                (m @ true, Some(ah)) => Some((m, ah)),
-                _ => None,
+            Self::User(user) => match &mut user.raw {
+                tl::enums::User::User(raw) => match (&mut raw.min, raw.access_hash.as_mut()) {
+                    (m @ true, Some(ah)) => Some((m, ah)),
+                    _ => None,
+                },
+                tl::enums::User::Empty(_) => None,
             },
             // Small group chats don't have an `access_hash` to begin with.
             Self::Group(_group) => None,
@@ -195,30 +197,36 @@ impl Chat {
         }
     }
 
-    // get an chat photo downloadable
-    pub fn photo_downloadable(&self, big: bool) -> Option<crate::types::Downloadable> {
+    // Return the profile picture or chat photo of this chat, if any.
+    pub fn photo(&self, big: bool) -> Option<crate::types::ChatPhoto> {
         let peer = self.pack().to_input_peer();
         match self {
-            Self::User(user) => user.photo().map(|x| {
-                crate::types::Downloadable::UserProfilePhoto(crate::types::UserProfilePhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::User(user) => user.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
-            Self::Group(group) => group.photo().map(|x| {
-                crate::types::Downloadable::ChatPhoto(crate::types::ChatPhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::Group(group) => group.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
-            Self::Channel(channel) => channel.photo().map(|x| {
-                crate::types::Downloadable::ChatPhoto(crate::types::ChatPhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::Channel(channel) => channel.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
         }
     }

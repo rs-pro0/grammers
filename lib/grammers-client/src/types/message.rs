@@ -5,13 +5,13 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+use crate::ChatMap;
 #[cfg(any(feature = "markdown", feature = "html"))]
 use crate::parsers;
 use crate::types::reactions::InputReactions;
 use crate::types::{InputMessage, Media, Photo};
-use crate::ChatMap;
-use crate::{types, Client};
-use crate::{utils, InputMedia};
+use crate::{Client, types};
+use crate::{InputMedia, utils};
 use chrono::{DateTime, Utc};
 use grammers_mtsender::InvocationError;
 use grammers_session::PackedChat;
@@ -21,10 +21,7 @@ use std::sync::Arc;
 use types::Chat;
 
 #[cfg(feature = "fs")]
-use {
-    crate::types::Downloadable,
-    std::{io, path::Path},
-};
+use std::{io, path::Path};
 
 pub(crate) const EMPTY_MESSAGE: tl::types::Message = tl::types::Message {
     out: false,
@@ -682,10 +679,7 @@ impl Message {
     pub async fn download_media<P: AsRef<Path>>(&self, path: P) -> Result<bool, io::Error> {
         // TODO probably encode failed download in error
         if let Some(media) = self.media() {
-            self.client
-                .download_media(&Downloadable::Media(media), path)
-                .await
-                .map(|_| true)
+            self.client.download_media(&media, path).await.map(|_| true)
         } else {
             Ok(false)
         }

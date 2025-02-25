@@ -10,8 +10,8 @@
 
 use super::Client;
 use crate::types::{
-    chats::AdminRightsBuilderInner, chats::BannedRightsBuilderInner, AdminRightsBuilder,
-    BannedRightsBuilder, Chat, ChatMap, IterBuffer, Message, Participant, Photo, User,
+    AdminRightsBuilder, BannedRightsBuilder, Chat, ChatMap, IterBuffer, Message, Participant,
+    Photo, User, chats::AdminRightsBuilderInner, chats::BannedRightsBuilderInner,
 };
 use grammers_mtsender::RpcError;
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
@@ -293,8 +293,7 @@ impl ProfilePhotoIter {
                     iter.request.offset += photos.len() as i32;
                 }
 
-                iter.buffer
-                    .extend(photos.into_iter().map(|x| Photo::from_raw(x)));
+                iter.buffer.extend(photos.into_iter().map(Photo::from_raw));
 
                 Ok(total)
             }
