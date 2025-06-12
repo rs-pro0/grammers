@@ -318,9 +318,9 @@ impl ProfilePhotoIter {
                 while let Some(message) = iter.next().await? {
                     if let Some(tl::enums::MessageAction::ChatEditPhoto(
                         tl::types::MessageActionChatEditPhoto { photo },
-                    )) = message.raw_action
+                    )) = message.action()
                     {
-                        return Ok(Some(Photo::from_raw(photo)));
+                        return Ok(Some(Photo::from_raw(photo.clone())));
                     } else {
                         continue;
                     }
@@ -374,6 +374,7 @@ impl Client {
         let tl::types::contacts::ResolvedPeer { peer, users, chats } = match self
             .invoke(&tl::functions::contacts::ResolveUsername {
                 username: username.into(),
+                referer: None,
             })
             .await
         {
@@ -756,7 +757,7 @@ impl Client {
     }
 
     #[cfg(feature = "parse_invite_link")]
-    fn parse_invite_link(invite_link: &str) -> Option<String> {
+    pub fn parse_invite_link(invite_link: &str) -> Option<String> {
         let url_parse_result = url::Url::parse(invite_link);
         if url_parse_result.is_err() {
             return None;

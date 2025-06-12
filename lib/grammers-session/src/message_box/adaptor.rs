@@ -5,8 +5,7 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::ChatHashCache;
-use super::defs::{Entry, Gap, NO_PTS, NO_SEQ, PtsInfo};
+use super::defs::{Gap, Key, NO_PTS, NO_SEQ, PtsInfo};
 use grammers_tl_types as tl;
 use log::info;
 
@@ -43,7 +42,6 @@ pub(super) fn update_short(short: tl::types::UpdateShort) -> tl::types::UpdatesC
 
 pub(super) fn update_short_message(
     short: tl::types::UpdateShortMessage,
-    self_id: i64,
 ) -> tl::types::UpdatesCombined {
     update_short(tl::types::UpdateShort {
         update: tl::types::UpdateNewMessage {
@@ -59,14 +57,10 @@ pub(super) fn update_short_message(
                 pinned: false,
                 noforwards: false,
                 invert_media: false,
+                video_processing_pending: false,
                 reactions: None,
                 id: short.id,
-                from_id: Some(
-                    tl::types::PeerUser {
-                        user_id: if short.out { self_id } else { short.user_id },
-                    }
-                    .into(),
-                ),
+                from_id: None,
                 from_boosts_applied: None,
                 peer_id: tl::types::PeerChat {
                     chat_id: short.user_id,
@@ -94,6 +88,7 @@ pub(super) fn update_short_message(
                 via_business_bot_id: None,
                 effect: None,
                 factcheck: None,
+                report_delivery_until_date: None,
             }
             .into(),
             pts: short.pts,
@@ -121,6 +116,7 @@ pub(super) fn update_short_chat_message(
                 pinned: false,
                 noforwards: false,
                 invert_media: false,
+                video_processing_pending: false,
                 reactions: None,
                 id: short.id,
                 from_id: Some(
@@ -156,6 +152,7 @@ pub(super) fn update_short_chat_message(
                 via_business_bot_id: None,
                 effect: None,
                 factcheck: None,
+                report_delivery_until_date: None,
             }
             .into(),
             pts: short.pts,
@@ -184,10 +181,7 @@ pub(super) fn update_short_sent_message(
     })
 }
 
-pub(super) fn adapt(
-    updates: tl::enums::Updates,
-    chat_hashes: &ChatHashCache,
-) -> Result<tl::types::UpdatesCombined, Gap> {
+pub(super) fn adapt(updates: tl::enums::Updates) -> Result<tl::types::UpdatesCombined, Gap> {
     Ok(match updates {
         // > `updatesTooLong` indicates that there are too many events pending to be pushed
         // > to the client, so one needs to fetch them manually.
@@ -207,7 +201,7 @@ pub(super) fn adapt(
             // about the chat so that [min constructors][0] can be used.
             //
             // [0]: https://core.telegram.org/api/min
-            update_short_message(short, chat_hashes.self_id())
+            update_short_message(short)
         }
         tl::enums::Updates::UpdateShortChatMessage(short) => {
             // No need to check for chats here. Small group chats do not require an access
@@ -232,6 +226,43 @@ pub(super) fn adapt(
         // that the `pts` can be kept consistent.
         tl::enums::Updates::UpdateShortSentMessage(short) => update_short_sent_message(short),
     })
+}
+
+pub(super) fn adapt_channel_difference(
+    difference: tl::enums::updates::ChannelDifference,
+) -> tl::types::updates::ChannelDifference {
+    match difference {
+        tl::enums::updates::ChannelDifference::Empty(difference) => {
+            tl::types::updates::ChannelDifference {
+                r#final: difference.r#final,
+                pts: difference.pts,
+                timeout: difference.timeout,
+                new_messages: Vec::new(),
+                other_updates: Vec::new(),
+                chats: Vec::new(),
+                users: Vec::new(),
+            }
+        }
+        tl::enums::updates::ChannelDifference::TooLong(difference) => {
+            tl::types::updates::ChannelDifference {
+                r#final: difference.r#final,
+                pts: match difference.dialog {
+                    tl::enums::Dialog::Dialog(d) => d
+                        .pts
+                        .expect("channelDifferenceTooLong dialog did not actually contain a pts"),
+                    tl::enums::Dialog::Folder(_) => {
+                        panic!("received a folder on channelDifferenceTooLong")
+                    }
+                },
+                timeout: difference.timeout,
+                new_messages: Vec::new(),
+                other_updates: Vec::new(),
+                chats: difference.chats,
+                users: difference.users,
+            }
+        }
+        tl::enums::updates::ChannelDifference::Difference(difference) => difference,
+    }
 }
 
 fn message_peer(message: &tl::enums::Message) -> Option<tl::enums::Peer> {
@@ -266,16 +297,16 @@ impl PtsInfo {
                     Some(tl::enums::Peer::Channel(_))
                 ));
                 Some(Self {
+                    key: Key::Common,
                     pts: u.pts,
-                    pts_count: u.pts_count,
-                    entry: Entry::AccountWide,
+                    count: u.pts_count,
                 })
             }
             MessageId(_) => None,
             DeleteMessages(u) => Some(Self {
+                key: Key::Common,
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::AccountWide,
+                count: u.pts_count,
             }),
             UserTyping(_) => None,
             ChatUserTyping(_) => None,
@@ -284,9 +315,9 @@ impl PtsInfo {
             UserName(_) => None,
             NewAuthorization(_) => None,
             NewEncryptedMessage(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             EncryptedChatTyping(_) => None,
             Encryption(_) => None,
@@ -301,33 +332,33 @@ impl PtsInfo {
             ReadHistoryInbox(u) => {
                 assert!(!matches!(u.peer, tl::enums::Peer::Channel(_)));
                 Some(Self {
+                    key: Key::Common,
                     pts: u.pts,
-                    pts_count: u.pts_count,
-                    entry: Entry::AccountWide,
+                    count: u.pts_count,
                 })
             }
             ReadHistoryOutbox(u) => {
                 assert!(!matches!(u.peer, tl::enums::Peer::Channel(_)));
                 Some(Self {
+                    key: Key::Common,
                     pts: u.pts,
-                    pts_count: u.pts_count,
-                    entry: Entry::AccountWide,
+                    count: u.pts_count,
                 })
             }
             WebPage(u) => Some(Self {
+                key: Key::Common,
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::AccountWide,
+                count: u.pts_count,
             }),
             ReadMessagesContents(u) => Some(Self {
+                key: Key::Common,
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::AccountWide,
+                count: u.pts_count,
             }),
             ChannelTooLong(u) => u.pts.map(|pts| Self {
+                key: Key::Channel(u.channel_id),
                 pts,
-                pts_count: 0,
-                entry: Entry::Channel(u.channel_id),
+                count: 0,
             }),
             Channel(_) => None,
             // Telegram actually sends `updateNewChannelMessage(messageEmpty(…))`, and because
@@ -336,19 +367,19 @@ impl PtsInfo {
             //
             // Future messages should trigger a gap that we need to recover from.
             NewChannelMessage(u) => message_channel_id(&u.message).map(|channel_id| Self {
+                key: Key::Channel(channel_id),
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::Channel(channel_id),
+                count: u.pts_count,
             }),
             ReadChannelInbox(u) => Some(Self {
+                key: Key::Channel(u.channel_id),
                 pts: u.pts,
-                pts_count: 0,
-                entry: Entry::Channel(u.channel_id),
+                count: 0,
             }),
             DeleteChannelMessages(u) => Some(Self {
+                key: Key::Channel(u.channel_id),
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::Channel(u.channel_id),
+                count: u.pts_count,
             }),
             ChannelMessageViews(_) => None,
             ChatParticipantAdmin(_) => None,
@@ -359,9 +390,9 @@ impl PtsInfo {
             BotInlineQuery(_) => None,
             BotInlineSend(_) => None,
             EditChannelMessage(u) => message_channel_id(&u.message).map(|channel_id| Self {
+                key: Key::Channel(channel_id),
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::Channel(channel_id),
+                count: u.pts_count,
             }),
             BotCallbackQuery(_) => None,
             EditMessage(u) => {
@@ -370,9 +401,9 @@ impl PtsInfo {
                     Some(tl::enums::Peer::Channel(_))
                 ));
                 Some(Self {
+                    key: Key::Common,
                     pts: u.pts,
-                    pts_count: u.pts_count,
-                    entry: Entry::AccountWide,
+                    count: u.pts_count,
                 })
             }
             InlineBotCallbackQuery(_) => None,
@@ -383,9 +414,9 @@ impl PtsInfo {
             Config => None,
             PtsChanged => None,
             ChannelWebPage(u) => Some(Self {
+                key: Key::Channel(u.channel_id),
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::Channel(u.channel_id),
+                count: u.pts_count,
             }),
             DialogPinned(_) => None,
             PinnedDialogs(_) => None,
@@ -404,9 +435,9 @@ impl PtsInfo {
             MessagePoll(_) => None,
             ChatDefaultBannedRights(_) => None,
             FolderPeers(u) => Some(Self {
+                key: Key::Common,
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::AccountWide,
+                count: u.pts_count,
             }),
             PeerSettings(_) => None,
             PeerLocated(_) => None,
@@ -428,42 +459,42 @@ impl PtsInfo {
             PinnedMessages(u) => {
                 assert!(!matches!(u.peer, tl::enums::Peer::Channel(_)));
                 Some(Self {
+                    key: Key::Common,
                     pts: u.pts,
-                    pts_count: u.pts_count,
-                    entry: Entry::AccountWide,
+                    count: u.pts_count,
                 })
             }
             PinnedChannelMessages(u) => Some(Self {
+                key: Key::Channel(u.channel_id),
                 pts: u.pts,
-                pts_count: u.pts_count,
-                entry: Entry::Channel(u.channel_id),
+                count: u.pts_count,
             }),
             Chat(_) => None,
             GroupCallParticipants(_) => None,
             GroupCall(_) => None,
             PeerHistoryTtl(_) => None,
             ChatParticipant(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             ChannelParticipant(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             BotStopped(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             GroupCallConnection(_) => None,
             BotCommands(_) => None,
             PendingJoinRequests(_) => None,
             BotChatInviteRequester(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             MessageReactions(_) => None,
             AttachMenuBots => None,
@@ -488,21 +519,21 @@ impl PtsInfo {
             StoriesStealthMode(_) => None,
             SentStoryReaction(_) => None,
             BotChatBoost(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             ChannelViewForumAsMessages(_) => None,
             PeerWallpaper(_) => None,
             BotMessageReaction(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             BotMessageReactions(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             SavedDialogPinned(_) => None,
             PinnedSavedDialogs(_) => None,
@@ -515,24 +546,30 @@ impl PtsInfo {
             DeleteQuickReplyMessages(_) => None,
             BotBusinessConnect(_) => None,
             BotNewBusinessMessage(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             BotEditBusinessMessage(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: 1,
-                entry: Entry::SecretChats,
+                count: 1,
             }),
             BotDeleteBusinessMessage(u) => Some(Self {
+                key: Key::Secondary,
                 pts: u.qts,
-                pts_count: u.messages.len() as i32,
-                entry: Entry::SecretChats,
+                count: u.messages.len() as i32,
             }),
             BroadcastRevenueTransactions(_) => None,
             StarsBalance(_) => None,
             BusinessBotCallbackQuery(_) => None,
             StarsRevenueStatus(_) => None,
+            BotPurchasedPaidMedia(u) => Some(Self {
+                key: Key::Secondary,
+                pts: u.qts,
+                count: 1, // TODO unsure if 1
+            }),
+            PaidReactionPrivacy(_) => None,
         }
         .filter(|info| info.pts != NO_PTS)
     }
