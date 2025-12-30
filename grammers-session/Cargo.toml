@@ -1,0 +1,32 @@
+[package]
+name = "grammers-session"
+version = "0.8.0"
+authors = ["Lonami Exo <totufals@hotmail.com>"]
+license = "MIT OR Apache-2.0"
+description = """
+Different session storages for Telegram data.
+"""
+homepage = "https://github.com/Lonami/grammers"
+documentation = "https://docs.rs/grammers-session"
+repository = "https://github.com/Lonami/grammers"
+keywords = ["telegram", "tl"]
+categories = []
+edition = "2024"
+
+[dependencies]
+grammers-tl-types = { path = "../grammers-tl-types", version = "0.8.0" }
+log = "0.4.28"
+
+rusqlite = { version = "0.38.0", optional = true }
+
+serde = { version = "1", features = ["derive"], optional = true }
+serde_with = { version = "3", features = ["hex"], optional = true }
+
+[dev-dependencies]
+toml = "0.9.8"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+
+[features]
+default = ["sqlite-storage"]
+sqlite-storage = ["dep:rusqlite"]
+serde = ["dep:serde", "dep:serde_with"]

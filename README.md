@@ -1,6 +1,6 @@
 # gramme.rs
 
-A set of Rust libraries to interact with Telegram's API, hence the name *(tele)gramme.rs*.
+A set of Rust crates to interact with Telegram's API, hence the name *(tele)gramme.rs*.
 
 ## Current status
 
@@ -9,28 +9,34 @@ real projects], such as [RSS bots].
 
 For an up-to-date taste on how the library looks like, refer to the [client examples] folder.
 
-For more documentation, please refer to <https://docs.rs/grammers-client/>.
+For the API reference, please refer to <https://docs.rs/grammers-client/>.
 
-## Libraries
+## Crates
 
-The following libraries under [`lib/`] can be used to work with Telegram in some way:
+![Diagram depicting the crate hierarchy](assets/crate-hierarchy.svg)
 
-* **[grammers-client]**: high-level API.
+* **[grammers-client]**: high-level API. Depends on:
+  * `grammers-tl-types` to both [invoke requests] and wrap [raw types].
+  * `grammers-session` to persist home [datacenter], logged-in user and [cache peers].
+  * `grammers-mtsender` to connect to Telegram's servers and exchange messages.
+  * `grammers-crypto` to support [Two-Factor Authentication] logins.
+* **[grammers-mtsender]**: network connection to Telegram. Depends on:
+  * `grammers-tl-types` to initialize the connection and offer an ergonomic [RPC interface].
+  * `grammers-session` to persist the DC configuration and corresponding [Authorization Key]s.
+  * `grammers-mtproto` to serialize messages and manage the connection state.
+  * `grammers-crypto` for efficient buffer usage.
+* **[grammers-session]**: session storages for the client. Depends on:
+  * `grammers-tl-types` to provide a more ergonomic interface over peers.
+* **[grammers-mtproto]**: implementation of the [Mobile Transport Protocol]. Depends on:
+  * `grammers-tl-types` to invoke and parse the core messages of the protocol.
+  * `grammers-crypto` to encrypt the communication with Telegram.
+* **[grammers-tl-types]**: generated Rust types for a certain layer. Depends on:
+  * `grammers-tl-gen` to generate the Rust code that makes up the crate itself.
+  * `grammers-tl-parser` to parse the TL files with all definitions used by Telegram.
 * **[grammers-crypto]**: cryptography-related methods.
-* **[grammers-mtproto]**: implementation of the [Mobile Transport Protocol].
-* **[grammers-mtsender]**: network connection to Telegram.
-* **[grammers-session]**: session storages for the client.
-* **[grammers-tl-gen]**: Rust code generator from TL definitions.
+* **[grammers-tl-gen]**: Rust code generator from TL definitions. Depends on:
+  * `grammers-tl-parser` to compose functions referencing the parsed definition types.
 * **[grammers-tl-parser]**: a [Type Language] parser.
-* **[grammers-tl-types]**: generated Rust types for a certain layer.
-
-## Binaries
-
-The following auxiliary CLI tools are available in the [`bin/`] folder:
-
-* **[scrape-docs]**: scrape Telegram's website to obtain raw API documentation.
-* **[tl-to-json]**: tool to read `.tl` and output `.json`, equivalent to
-  [Telegram's JSON schema][tl-json].
 
 ## Security
 
@@ -63,6 +69,13 @@ on your issues or pull requests. Please do call me out if you think my behaviour
 at any time. I will try to keep the discussion as technical as possible. Similarly, I will not
 tolerate poor behaviour from your side towards other people (including myself).
 
+It is recommended to run these commands to make the Git experience a bit nicer:
+
+```sh
+git config --local blame.ignoreRevsFile .git-blame-ignore-revs
+cp pre-commit .git/hooks/
+```
+
 If you don't have the time to [contribute code], you may contribute by [reporting issues] or
 feature ideas. Please note that every feature added will increase maintenance burden on my part,
 so be mindful when suggesting things. It may be possible that your idea could exist as its own
@@ -74,19 +87,24 @@ dual licensed as above, without any additional terms or conditions.
 
 [build real projects]: https://github.com/Lonami/grammers/wiki/Real-world-projects
 [RSS bots]: https://github.com/Lonami/srsrssrsbot
-[client examples]: lib/grammers-client/examples
+[client examples]: grammers-client/examples
 [Mobile Transport Protocol]: https://core.telegram.org/mtproto
 [Type Language]: https://core.telegram.org/mtproto/TL
-[`lib/`]: lib/
-[grammers-client]: lib/grammers-client/
-[grammers-crypto]: lib/grammers-crypto/
-[grammers-mtproto]: lib/grammers-mtproto/
-[grammers-mtsender]: lib/grammers-mtsender/
-[grammers-session]: lib/grammers-session/
-[grammers-tl-gen]: lib/grammers-tl-gen/
-[grammers-tl-parser]: lib/grammers-tl-parser/
-[grammers-tl-types]: lib/grammers-tl-types/
-[`bin/`]: bin/
+[grammers-client]: grammers-client/
+[grammers-crypto]: grammers-crypto/
+[grammers-mtproto]: grammers-mtproto/
+[grammers-mtsender]: grammers-mtsender/
+[grammers-session]: grammers-session/
+[grammers-tl-gen]: grammers-tl-gen/
+[grammers-tl-parser]: grammers-tl-parser/
+[grammers-tl-types]: grammers-tl-types/
+[invoke requests]: https://core.telegram.org/methods
+[raw types]: https://core.telegram.org/schema
+[datacenter]: https://core.telegram.org/api/datacenter
+[cache peers]: https://core.telegram.org/api/peers
+[Two-Factor Authentication]: https://core.telegram.org/api/srp
+[RPC interface]: https://core.telegram.org/api/invoking
+[Authorization Key]: https://core.telegram.org/mtproto/auth_key
 [scrape-docs]: bin/scrape-docs/
 [tl-to-json]: bin/tl-to-json/
 [tl-json]: https://core.telegram.org/schema/json
