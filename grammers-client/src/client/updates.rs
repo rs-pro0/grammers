@@ -8,21 +8,21 @@
 
 //! Methods to deal with and offer access to updates.
 
-#![allow(deprecated)]
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
-use super::{Client, UpdatesConfiguration};
-use crate::types::{PeerMap, Update};
 use grammers_mtsender::InvocationError;
 use grammers_session::Session;
 use grammers_session::types::{PeerId, PeerInfo, UpdateState, UpdatesState};
-pub use grammers_session::updates::{MessageBoxes, PrematureEndReason, State, UpdatesLike};
+use grammers_session::updates::{MessageBoxes, PrematureEndReason, State, UpdatesLike};
 use grammers_tl_types as tl;
 use log::{trace, warn};
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::timeout_at;
+
+use super::{Client, UpdatesConfiguration};
+use crate::peer::PeerMap;
+use crate::update::Update;
 
 /// How long to wait after warning the user that the updates limit was exceeded.
 const UPDATE_LIMIT_EXCEEDED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
@@ -31,7 +31,7 @@ const UPDATE_LIMIT_EXCEEDED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
 const BOT_CHANNEL_DIFF_LIMIT: i32 = 100000;
 const USER_CHANNEL_DIFF_LIMIT: i32 = 100;
 
-fn prepare_channel_difference(
+async fn prepare_channel_difference(
     mut request: tl::functions::updates::GetChannelDifference,
     session: &dyn Session,
     message_box: &mut MessageBoxes,
@@ -45,7 +45,7 @@ fn prepare_channel_difference(
         id,
         auth: Some(auth),
         ..
-    }) = session.peer(id)
+    }) = session.peer(id).await
     {
         request.channel = tl::enums::InputChannel::Channel(tl::types::InputChannel {
             channel_id: id,
@@ -53,6 +53,7 @@ fn prepare_channel_difference(
         });
         request.limit = if session
             .peer(PeerId::self_user())
+            .await
             .map(|user| match user {
                 PeerInfo::User { bot, .. } => bot.unwrap_or(false),
                 _ => false,
@@ -75,27 +76,32 @@ fn prepare_channel_difference(
     }
 }
 
+/// Iterator returned by [`Client::stream_updates`].
 pub struct UpdateStream {
     client: Client,
     message_box: MessageBoxes,
     // When did we last warn the user that the update queue filled up?
     // This is used to avoid spamming the log.
     last_update_limit_warn: Option<Instant>,
-    buffer: VecDeque<(tl::enums::Update, State, Arc<crate::types::PeerMap>)>,
+    buffer: VecDeque<(tl::enums::Update, State, PeerMap)>,
     updates: mpsc::UnboundedReceiver<UpdatesLike>,
     configuration: UpdatesConfiguration,
     should_get_state: bool,
 }
 
 impl UpdateStream {
+    /// Pops an update from the queue, waiting for an update to arrive first if the queue is empty.
     pub async fn next(&mut self) -> Result<Update, InvocationError> {
         let (update, state, peers) = self.next_raw().await?;
-        Ok(Update::new(&self.client, update, state, &peers))
+        Ok(Update::from_raw(&self.client, update, state, peers))
     }
 
+    /// Pops an update from the queue, waiting for an update to arrive first if the queue is empty.
+    ///
+    /// Unlike [`Self::next`], the update is not wrapped at all, but it is still processed.
     pub async fn next_raw(
         &mut self,
-    ) -> Result<(tl::enums::Update, State, Arc<PeerMap>), InvocationError> {
+    ) -> Result<(tl::enums::Update, State, PeerMap), InvocationError> {
         if self.should_get_state {
             self.should_get_state = false;
             match self
@@ -113,7 +119,8 @@ impl UpdateStream {
                             date: state.date,
                             seq: state.seq,
                             channels: Vec::new(),
-                        }));
+                        }))
+                        .await;
                 }
                 Err(_err) => {
                     // The account may no longer actually be logged in, or it can rarely fail.
@@ -130,21 +137,24 @@ impl UpdateStream {
                 (
                     self.message_box.check_deadlines(), // first, as it might trigger differences
                     self.message_box.get_difference(),
-                    self.message_box.get_channel_difference().and_then(|gd| {
-                        prepare_channel_difference(
-                            gd,
-                            self.client.0.session.as_ref(),
-                            &mut self.message_box,
-                        )
-                    }),
+                    match self.message_box.get_channel_difference() {
+                        Some(gd) => {
+                            prepare_channel_difference(
+                                gd,
+                                self.client.0.session.as_ref(),
+                                &mut self.message_box,
+                            )
+                            .await
+                        }
+                        None => None,
+                    },
                 )
             };
 
             if let Some(request) = get_diff {
                 let response = self.client.invoke(&request).await?;
                 let (updates, users, chats) = self.message_box.apply_difference(response);
-                let peers = PeerMap::new(users, chats);
-                self.client.cache_peers_maybe(&peers);
+                let peers = self.client.build_peer_map(users, chats).await;
                 self.extend_update_queue(updates, peers);
                 continue;
             }
@@ -199,21 +209,20 @@ impl UpdateStream {
 
                 let (updates, users, chats) = self.message_box.apply_channel_difference(response);
 
-                let peers = PeerMap::new(users, chats);
-                self.client.cache_peers_maybe(&peers);
+                let peers = self.client.build_peer_map(users, chats).await;
                 self.extend_update_queue(updates, peers);
                 continue;
             }
 
             match timeout_at(deadline.into(), self.updates.recv()).await {
-                Ok(Some(updates)) => self.process_socket_updates(updates),
+                Ok(Some(updates)) => self.process_socket_updates(updates).await,
                 Ok(None) => break Err(InvocationError::Dropped),
                 Err(_) => {}
             }
         }
     }
 
-    pub(crate) fn process_socket_updates(&mut self, updates: UpdatesLike) {
+    pub(crate) async fn process_socket_updates(&mut self, updates: UpdatesLike) {
         let mut result = Option::<(Vec<_>, Vec<_>, Vec<_>)>::None;
         match self.message_box.process_updates(updates) {
             Ok(tup) => {
@@ -229,8 +238,7 @@ impl UpdateStream {
         }
 
         if let Some((updates, users, chats)) = result {
-            let peers = PeerMap::new(users, chats);
-            self.client.cache_peers_maybe(&peers);
+            let peers = self.client.build_peer_map(users, chats).await;
             self.extend_update_queue(updates, peers);
         }
     }
@@ -238,7 +246,7 @@ impl UpdateStream {
     fn extend_update_queue(
         &mut self,
         mut updates: Vec<(tl::enums::Update, State)>,
-        peer_map: Arc<PeerMap>,
+        peer_map: PeerMap,
     ) {
         if let Some(limit) = self.configuration.update_queue_limit {
             if let Some(exceeds) = (self.buffer.len() + updates.len()).checked_sub(limit + 1) {
@@ -262,21 +270,18 @@ impl UpdateStream {
         }
 
         self.buffer
-            .extend(updates.into_iter().map(|(u, s)| (u, s, peer_map.clone())));
+            .extend(updates.into_iter().map(|(u, s)| (u, s, peer_map.handle())));
     }
 
     /// Synchronize the updates state to the session.
-    pub fn sync_update_state(&self) {
+    ///
+    /// This is **not** automatically done on drop.
+    pub async fn sync_update_state(&self) {
         self.client
             .0
             .session
-            .set_update_state(UpdateState::All(self.message_box.session_state()));
-    }
-}
-
-impl Drop for UpdateStream {
-    fn drop(&mut self) {
-        self.sync_update_state();
+            .set_update_state(UpdateState::All(self.message_box.session_state()))
+            .await;
     }
 }
 
@@ -288,15 +293,15 @@ impl Client {
     /// persisted in the session cache beforehand (i.e. be retrievable with [`Session::peer`]).
     /// A good way to achieve this is to use [`Self::iter_dialogs`] at least once after login.
     ///
-    /// The updates are wrapped in [`crate::Update`] to make them more convenient to use,
+    /// The updates are wrapped in [`crate::update::Update`] to make them more convenient to use,
     /// but their raw type is still accessible to bridge any missing functionality.
-    pub fn stream_updates(
+    pub async fn stream_updates(
         &self,
         updates: mpsc::UnboundedReceiver<UpdatesLike>,
         configuration: UpdatesConfiguration,
     ) -> UpdateStream {
         let message_box = if configuration.catch_up {
-            MessageBoxes::load(self.0.session.updates_state())
+            MessageBoxes::load(self.0.session.updates_state().await)
         } else {
             // If the user doesn't want to bother with catching up on previous update, start with
             // pristine state instead.
@@ -304,7 +309,7 @@ impl Client {
         };
         // Don't bother getting pristine update state if we're not logged in.
         let should_get_state =
-            message_box.is_empty() && self.0.session.peer(PeerId::self_user()).is_some();
+            message_box.is_empty() && self.0.session.peer(PeerId::self_user()).await.is_some();
 
         UpdateStream {
             client: self.clone(),
@@ -320,8 +325,9 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::future::Future;
+
+    use super::*;
 
     fn get_update_stream() -> UpdateStream {
         panic!()

@@ -6,23 +6,25 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::configuration::ConnectionParams;
-use crate::errors::ReadError;
-use crate::{InvocationError, Sender, ServerAddr, connect, connect_with_auth};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::ops::{ControlFlow, Deref};
+use std::sync::Arc;
+use std::{fmt, panic};
+
 use grammers_mtproto::{mtp, transport};
 use grammers_session::Session;
 use grammers_session::types::DcOption;
 use grammers_session::updates::UpdatesLike;
 use grammers_tl_types::{self as tl, enums};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-use std::ops::ControlFlow;
-use std::sync::Arc;
-use std::{fmt, panic};
 use tokio::task::AbortHandle;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+
+use crate::configuration::ConnectionParams;
+use crate::errors::ReadError;
+use crate::{InvocationError, Sender, ServerAddr, connect, connect_with_auth};
 
 pub(crate) type Transport = transport::Full;
 
@@ -51,21 +53,39 @@ struct ConnectionInfo {
     abort_handle: AbortHandle,
 }
 
+/// A fat [`SenderPoolHandle`] with additional metadata from its attached [`SenderPoolRunner`].
+#[derive(Clone)]
+pub struct SenderPoolFatHandle {
+    /// The inner thin handle that self can be derefed into.
+    ///
+    /// The rest of fields can be dropped if they are no longer needed.
+    pub thin: SenderPoolHandle,
+    /// The session in use by the attached [`SenderPoolRunner`].
+    ///
+    /// The runner will read and persist datacenter options in it.
+    pub session: Arc<dyn Session>,
+    /// Developer's [Application Identifier](https://core.telegram.org/myapp).
+    ///
+    /// The [`SenderPoolRunner`] will make use of this value when it needs
+    /// to invoke [`tl::functions::InitConnection`] after creating a new connection.
+    pub api_id: i32,
+}
+
 /// Cheaply cloneable handle to interact with its [`SenderPoolRunner`].
 #[derive(Clone)]
 pub struct SenderPoolHandle(mpsc::UnboundedSender<Request>);
 
-/// Named type holding the actual runner and initial handles. The entry point.
+/// Builder to configure the runner to drive I/O and linked handles.
 pub struct SenderPool {
     /// The single mutable instance responsible for driving I/O.
     ///
     /// Connections are created on-demand, so any errors while the pool
     /// is running can only be retrieved with one of the [`SenderPool::handle`]s.
     pub runner: SenderPoolRunner,
-    /// Starting handle attached to the [`SenderPool::runner`].
+    /// Starting fat handle attached to the [`SenderPool::runner`].
     ///
-    /// This is the only way to interact with the runner once it's running.
-    pub handle: SenderPoolHandle,
+    /// Handles are the only way to interact with the runner once it's running.
+    pub handle: SenderPoolFatHandle,
     /// The single mutable channel through which updates received
     /// from the network by the [`SenderPool::runner`] are delivered.
     ///
@@ -78,18 +98,21 @@ pub struct SenderPool {
 ///
 /// Use [`SenderPool::new`] to create an instance of this type and associated channels.
 pub struct SenderPoolRunner {
-    /// The session that will contain and persist the datacenter options.
-    pub session: Arc<dyn Session>,
-    /// Developer's [Application Identifier](https://core.telegram.org/myapp).
-    ///
-    /// This parameter required to initialize new connections.
-    pub api_id: i32,
-    /// Remaining connection parameters used to [`tl::functions::InitConnection`].
-    pub connection_params: ConnectionParams,
+    session: Arc<dyn Session>,
+    api_id: i32,
+    connection_params: ConnectionParams,
     request_rx: mpsc::UnboundedReceiver<Request>,
     updates_tx: mpsc::UnboundedSender<UpdatesLike>,
     connections: Vec<ConnectionInfo>,
     connection_pool: JoinSet<Result<(), ReadError>>,
+}
+
+impl Deref for SenderPoolFatHandle {
+    type Target = SenderPoolHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.thin
+    }
 }
 
 impl SenderPoolHandle {
@@ -146,10 +169,11 @@ impl SenderPool {
     ) -> Self {
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let session = session as Arc<dyn Session>;
 
         Self {
             runner: SenderPoolRunner {
-                session: session as Arc<dyn Session>,
+                session: Arc::clone(&session),
                 api_id,
                 connection_params,
                 request_rx,
@@ -157,7 +181,11 @@ impl SenderPool {
                 connections: Vec::new(),
                 connection_pool: JoinSet::new(),
             },
-            handle: SenderPoolHandle(request_tx),
+            handle: SenderPoolFatHandle {
+                thin: SenderPoolHandle(request_tx),
+                session,
+                api_id,
+            },
             updates: updates_rx,
         }
     }
@@ -222,7 +250,7 @@ impl SenderPoolRunner {
                         };
 
                         dc_option.auth_key = Some(sender.auth_key());
-                        self.session.set_dc_option(&dc_option);
+                        self.session.set_dc_option(&dc_option).await;
 
                         let (rpc_tx, rpc_rx) = mpsc::unbounded_channel();
                         let abort_handle = self.connection_pool.spawn(run_sender(
@@ -312,55 +340,55 @@ impl SenderPoolRunner {
             Err(e) => return Err(dbg!(e).into()),
         };
 
-        self.update_config(remote_config);
+        self.update_config(remote_config).await;
 
         Ok(sender)
     }
 
-    fn update_config(&mut self, config: tl::types::Config) {
-        config
+    async fn update_config(&mut self, config: tl::types::Config) {
+        for option in config
             .dc_options
             .iter()
             .map(|tl::enums::DcOption::Option(option)| option)
             .filter(|option| !option.media_only && !option.tcpo_only && option.r#static)
-            .for_each(|option| {
-                let mut dc_option = self
-                    .session
-                    .dc_option(option.id)
-                    .unwrap_or_else(|| DcOption {
-                        id: option.id,
-                        ipv4: SocketAddrV4::new(Ipv4Addr::from_bits(0), 0),
-                        ipv6: SocketAddrV6::new(Ipv6Addr::from_bits(0), 0, 0, 0),
-                        auth_key: None,
-                    });
-                if option.ipv6 {
+        {
+            let mut dc_option = self
+                .session
+                .dc_option(option.id)
+                .unwrap_or_else(|| DcOption {
+                    id: option.id,
+                    ipv4: SocketAddrV4::new(Ipv4Addr::from_bits(0), 0),
+                    ipv6: SocketAddrV6::new(Ipv6Addr::from_bits(0), 0, 0, 0),
+                    auth_key: None,
+                });
+            if option.ipv6 {
+                dc_option.ipv6 = SocketAddrV6::new(
+                    option
+                        .ip_address
+                        .parse()
+                        .expect("Telegram to return a valid IPv6 address"),
+                    option.port as _,
+                    0,
+                    0,
+                );
+            } else {
+                dc_option.ipv4 = SocketAddrV4::new(
+                    option
+                        .ip_address
+                        .parse()
+                        .expect("Telegram to return a valid IPv4 address"),
+                    option.port as _,
+                );
+                if dc_option.ipv6.ip().to_bits() == 0 {
                     dc_option.ipv6 = SocketAddrV6::new(
-                        option
-                            .ip_address
-                            .parse()
-                            .expect("Telegram to return a valid IPv6 address"),
-                        option.port as _,
+                        dc_option.ipv4.ip().to_ipv6_mapped(),
+                        dc_option.ipv4.port(),
                         0,
                         0,
-                    );
-                } else {
-                    dc_option.ipv4 = SocketAddrV4::new(
-                        option
-                            .ip_address
-                            .parse()
-                            .expect("Telegram to return a valid IPv4 address"),
-                        option.port as _,
-                    );
-                    if dc_option.ipv6.ip().to_bits() == 0 {
-                        dc_option.ipv6 = SocketAddrV6::new(
-                            dc_option.ipv4.ip().to_ipv6_mapped(),
-                            dc_option.ipv4.port(),
-                            0,
-                            0,
-                        )
-                    }
+                    )
                 }
-            });
+            }
+        }
     }
 }
 

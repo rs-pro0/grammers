@@ -5,13 +5,18 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::{Client, ClientInner};
-use crate::client::{client::ClientConfiguration, retry_policy::RetryContext};
-use grammers_mtsender::{InvocationError, SenderPool};
+
+use std::num::NonZeroU32;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
+
+use grammers_mtsender::{InvocationError, SenderPoolFatHandle};
 use grammers_tl_types::{self as tl, Deserializable};
 use log::info;
-use std::{num::NonZeroU32, ops::ControlFlow, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::sleep};
+
+use super::{Client, ClientConfiguration, ClientInner, RetryContext};
 
 /// Method implementations directly related with network connectivity.
 impl Client {
@@ -31,7 +36,7 @@ impl Client {
     /// ```
     /// use std::sync::Arc;
     /// use grammers_client::Client;
-    /// use grammers_session::storages::SqliteSession;
+    /// use grammers_session::storages::MemorySession; // avoid this storage outside tests!
     /// use grammers_mtsender::SenderPool;
     ///
     /// // Note: these are example values and are not actually valid.
@@ -39,26 +44,26 @@ impl Client {
     /// const API_ID: i32 = 932939;
     ///
     /// # async fn f() -> Result<(), Box<dyn std::error::Error>> {
-    /// let session = Arc::new(SqliteSession::open("hello-world.session")?);
+    /// let session = Arc::new(MemorySession::default());
     /// let pool = SenderPool::new(Arc::clone(&session), API_ID);
-    /// let client = Client::new(&pool);
+    /// let client = Client::new(pool.handle);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(sender_pool: &SenderPool) -> Self {
+    pub fn new(sender_pool: SenderPoolFatHandle) -> Self {
         Self::with_configuration(sender_pool, Default::default())
     }
 
     /// Like [`Self::new`] but with a custom [`ClientConfiguration`].
     pub fn with_configuration(
-        sender_pool: &SenderPool,
+        sender_pool: SenderPoolFatHandle,
         configuration: ClientConfiguration,
     ) -> Self {
         // TODO Sender doesn't have a way to handle backpressure yet
         Self(Arc::new(ClientInner {
-            session: Arc::clone(&sender_pool.runner.session),
-            api_id: sender_pool.runner.api_id,
-            handle: sender_pool.handle.clone(),
+            session: sender_pool.session,
+            api_id: sender_pool.api_id,
+            handle: sender_pool.thin,
             configuration,
             auth_copied_to_dcs: Mutex::new(Vec::new()),
         }))
@@ -69,9 +74,9 @@ impl Client {
     /// Using function definitions corresponding to a different layer is likely to cause the
     /// responses to the request to not be understood.
     ///
-    /// <div class="stab unstable">
+    /// <div class="warning">
     ///
-    /// **Warning**: this method is **not** part of the stability guarantees of semantic
+    /// This method is **not** part of the stability guarantees of semantic
     /// versioning. It **may** break during *minor* version changes (but not on patch version
     /// changes). Use with care.
     ///
@@ -98,6 +103,14 @@ impl Client {
     }
 
     /// Like [`Self::invoke`], but in the specified DC.
+    ///
+    /// <div class="warning">
+    ///
+    /// This method is **not** part of the stability guarantees of semantic
+    /// versioning. It **may** break during *minor* version changes (but not on patch version
+    /// changes). Use with care.
+    ///
+    /// </div>
     pub async fn invoke_in_dc<R: tl::RemoteCall>(
         &self,
         dc_id: i32,

@@ -68,13 +68,6 @@
 //!   Only useful for low-level libraries.
 //!
 //! * `impl-serde`: generates code for serde support
-//!
-//! [`types`]: types/index.html
-//! [`functions`]: functions/index.html
-//! [`RemoteCall`]: trait.RemoteCall.html
-//! [`Serializable`]: trait.Serializable.html
-//! [`Deserializable`]: trait.Deserializable.html
-//! [`LAYER`]: constant.LAYER.html
 
 #![deny(unsafe_code)]
 
@@ -84,10 +77,9 @@ pub mod serialize;
 
 pub use deserialize::{Cursor, Deserializable};
 pub use generated::{LAYER, enums, functions, name_for_id, types};
-pub use serialize::Serializable;
-
 #[cfg(feature = "impl-serde")]
 use serde_derive::{Deserialize, Serialize};
+pub use serialize::Serializable;
 
 /// Bare vector type (`vector` as opposed to the type `Vector`).
 ///

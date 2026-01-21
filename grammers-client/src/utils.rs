@@ -6,11 +6,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use chrono::{DateTime, Utc};
-use grammers_tl_types as tl;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::SystemTime;
+
+use chrono::{DateTime, Utc};
+use grammers_tl_types as tl;
 
 // This atomic isn't for anything critical, just to generate unique IDs without locks.
 // The worst that can happen if the load and store orderings are wrong is that the IDs
@@ -61,7 +62,7 @@ pub(crate) fn extract_password_parameters(
     (salt1, salt2, p, g)
 }
 
-pub fn peer_from_message(message: &tl::enums::Message) -> Option<tl::enums::Peer> {
+pub(crate) fn peer_from_message(message: &tl::enums::Message) -> Option<tl::enums::Peer> {
     match &message {
         tl::enums::Message::Empty(message) => message.peer_id.clone(),
         tl::enums::Message::Message(message) => Some(message.peer_id.clone()),

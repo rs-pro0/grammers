@@ -5,9 +5,11 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::defs::{Gap, Key, NO_PTS, NO_SEQ, PtsInfo, UpdatesLike};
+
 use grammers_tl_types as tl;
 use log::info;
+
+use super::defs::{Gap, Key, NO_PTS, NO_SEQ, PtsInfo, UpdatesLike};
 
 // > The `updateShortMessage`, `updateShortSentMessage` and `updateShortChatMessage` constructors
 // > [...] should be transformed to `updateShort` upon receiving.
@@ -92,6 +94,7 @@ fn update_short_message(short: tl::types::UpdateShortMessage) -> tl::types::Upda
                 paid_suggested_post_ton: false,
                 suggested_post: None,
                 schedule_repeat_period: None,
+                summary_from_language: None,
             }
             .into(),
             pts: short.pts,
@@ -161,6 +164,7 @@ fn update_short_chat_message(
                 paid_suggested_post_ton: false,
                 suggested_post: None,
                 schedule_repeat_period: None,
+                summary_from_language: None,
             }
             .into(),
             pts: short.pts,
@@ -327,6 +331,7 @@ pub(super) fn adapt(updates: UpdatesLike) -> Result<tl::types::UpdatesCombined, 
                         paid_message_stars: None,
                         suggested_post: None,
                         schedule_repeat_period: None,
+                        summary_from_language: None,
                     }
                     .into(),
                     pts: update.pts,

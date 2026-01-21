@@ -22,14 +22,15 @@
 //! how much data a button's payload can contain, and to keep it simple, we're storing it inline
 //! in decimal, so the numbers can't get too large).
 
-#![allow(deprecated)]
+use std::env;
+use std::sync::Arc;
 
-use grammers_client::{Client, InputMessage, Update, button, reply_markup};
+use grammers_client::Client;
+use grammers_client::message::{Button, InputMessage, ReplyMarkup};
+use grammers_client::update::Update;
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use simple_logger::SimpleLogger;
-use std::env;
-use std::sync::Arc;
 use tokio::{runtime, task};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -42,11 +43,11 @@ const NUMBERS_PER_PAGE: usize = 4;
 const MAX_PAYLOAD_DATA_LEN: usize = 64;
 
 /// Generate the inline keyboard reply markup with a few more numbers from the sequence.
-fn fib_markup(mut a: u128, mut b: u128) -> reply_markup::Inline {
+fn fib_markup(mut a: u128, mut b: u128) -> ReplyMarkup {
     let mut rows = Vec::with_capacity(NUMBERS_PER_PAGE + 1);
     for _ in 0..NUMBERS_PER_PAGE {
         let text = a.to_string();
-        rows.push(vec![button::inline(&text, text.as_bytes())]);
+        rows.push(vec![Button::data(&text, text.as_bytes())]);
 
         let bb = b;
         b += a;
@@ -55,14 +56,14 @@ fn fib_markup(mut a: u128, mut b: u128) -> reply_markup::Inline {
 
     let next = format!("{a},{b}");
     if next.len() > MAX_PAYLOAD_DATA_LEN {
-        rows.push(vec![button::inline("I'm satisfied!!", b"done".to_vec())]);
+        rows.push(vec![Button::data("I'm satisfied!!", b"done".to_vec())]);
     } else {
         rows.push(vec![
-            button::inline("Restart!", b"0,1".to_vec()),
-            button::inline("More!", format!("{a},{b}").into_bytes()),
+            Button::data("Restart!", b"0,1".to_vec()),
+            Button::data("More!", format!("{a},{b}").into_bytes()),
         ]);
     }
-    reply_markup::inline(rows)
+    ReplyMarkup::from_buttons(&rows)
 }
 
 async fn handle_update(_client: Client, update: Update) -> Result {
@@ -72,7 +73,7 @@ async fn handle_update(_client: Client, update: Update) -> Result {
                 .respond(
                     InputMessage::new()
                         .text("Here's a fibonacci")
-                        .reply_markup(&fib_markup(0, 1)),
+                        .reply_markup(fib_markup(0, 1)),
                 )
                 .await?;
         }
@@ -96,7 +97,7 @@ async fn handle_update(_client: Client, update: Update) -> Result {
                     .answer()
                     .edit(
                         InputMessage::from(format!("S{os} much fibonacci 🔢"))
-                            .reply_markup(&fib_markup(a, b)),
+                            .reply_markup(fib_markup(a, b)),
                     )
                     .await?;
             } else if a % 2 == 0 {
@@ -120,13 +121,14 @@ async fn async_main() -> Result {
     let api_id = env!("TG_ID").parse().expect("TG_ID invalid");
     let token = env::args().nth(1).expect("token missing");
 
-    let session = Arc::new(SqliteSession::open(SESSION_FILE)?);
+    let session = Arc::new(SqliteSession::open(SESSION_FILE).await?);
 
-    let pool = SenderPool::new(Arc::clone(&session), api_id);
-    let client = Client::new(&pool);
     let SenderPool {
-        runner, updates, ..
-    } = pool;
+        runner,
+        handle,
+        updates,
+    } = SenderPool::new(Arc::clone(&session), api_id);
+    let client = Client::new(handle);
     let _ = tokio::spawn(runner.run());
 
     if !client.is_authorized().await? {
@@ -136,7 +138,7 @@ async fn async_main() -> Result {
     }
 
     println!("Waiting for messages...");
-    let mut updates = client.stream_updates(updates, Default::default());
+    let mut updates = client.stream_updates(updates, Default::default()).await;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,

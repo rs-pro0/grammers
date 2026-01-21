@@ -13,13 +13,12 @@
 //! Messages will be printed to stdout, and media will be saved in the `target/` folder locally, named
 //! message-[MSG_ID].[EXT]
 
-#![allow(deprecated)]
-
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, io};
 
+use grammers_client::media::Media;
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
@@ -27,8 +26,6 @@ use mime::Mime;
 use mime_guess::mime;
 use simple_logger::SimpleLogger;
 use tokio::runtime;
-
-use grammers_client::types::Media::{self, Contact, Document, Photo, Sticker};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -43,11 +40,10 @@ async fn async_main() -> Result<()> {
     let api_id = env!("TG_ID").parse().expect("TG_ID invalid");
     let peer_name = env::args().nth(1).expect("peer name missing");
 
-    let session = Arc::new(SqliteSession::open(SESSION_FILE)?);
+    let session = Arc::new(SqliteSession::open(SESSION_FILE).await?);
 
-    let pool = SenderPool::new(Arc::clone(&session), api_id);
-    let client = Client::new(&pool);
-    let SenderPool { runner, .. } = pool;
+    let SenderPool { runner, handle, .. } = SenderPool::new(Arc::clone(&session), api_id);
+    let client = Client::new(handle);
     let _ = tokio::spawn(runner.run());
 
     if !client.is_authorized().await? {
@@ -74,7 +70,12 @@ async fn async_main() -> Result<()> {
         println!("Signed in!");
     }
 
-    let maybe_peer = client.resolve_username(peer_name.as_str()).await?;
+    let maybe_peer = client
+        .resolve_username(peer_name.as_str())
+        .await?
+        .ok_or("no peer with username")?
+        .to_ref()
+        .await;
 
     let peer = maybe_peer.unwrap_or_else(|| panic!("Peer {peer_name} could not be found"));
 
@@ -120,10 +121,10 @@ fn main() -> Result<()> {
 
 fn get_file_extension(media: &Media) -> String {
     match media {
-        Photo(_) => ".jpg".to_string(),
-        Sticker(sticker) => get_mime_extension(sticker.document.mime_type()),
-        Document(document) => get_mime_extension(document.mime_type()),
-        Contact(_) => ".vcf".to_string(),
+        Media::Photo(_) => ".jpg".to_string(),
+        Media::Sticker(sticker) => get_mime_extension(sticker.document.mime_type()),
+        Media::Document(document) => get_mime_extension(document.mime_type()),
+        Media::Contact(_) => ".vcf".to_string(),
         _ => String::new(),
     }
 }

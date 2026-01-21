@@ -7,6 +7,7 @@
 // except according to those terms.
 
 //! Types and traits involving the deserialization of the generated objects.
+
 use std::fmt;
 
 /// Errors that can be produced by [`Cursor`].
@@ -28,7 +29,7 @@ pub enum Error {
     /// It is important to note that unboxed or bare [`types`] lack the
     /// constructor information, and as such they cannot be validated.
     ///
-    /// [`types`]: types/index.html
+    /// [`types`]: crate::types
     UnexpectedConstructor {
         /// The unexpected constructor identifier.
         id: u32,
@@ -99,8 +100,7 @@ impl<'a> Cursor<'a> {
 }
 
 /// Alias over a mutable reference to a [`Cursor`].
-// TODO this is only public for session
-pub type Buffer<'a, 'b> = &'a mut Cursor<'b>;
+pub(crate) type Buffer<'a, 'b> = &'a mut Cursor<'b>;
 
 /// A specialized `Result` type for deserialization operations.
 pub type Result<T> = std::result::Result<T, Error>;

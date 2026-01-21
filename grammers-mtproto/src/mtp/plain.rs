@@ -5,10 +5,12 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::{Deserialization, DeserializeError, Mtp, RpcResult};
-use crate::MsgId;
+
 use grammers_crypto::DequeBuffer;
 use grammers_tl_types::{Cursor, Deserializable, Serializable};
+
+use super::{Deserialization, DeserializeError, Mtp, RpcResult};
+use crate::MsgId;
 
 /// An implementation of the [Mobile Transport Protocol] for plaintext
 /// (unencrypted) messages.
@@ -25,7 +27,6 @@ use grammers_tl_types::{Cursor, Deserializable, Serializable};
 /// so being able to keep a simpler implementation separate is a bonus.
 ///
 /// [Mobile Transport Protocol]: https://core.telegram.org/mtproto
-/// [`Mtp`]: struct.Mtp.html
 #[non_exhaustive]
 pub struct Plain;
 

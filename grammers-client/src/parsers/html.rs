@@ -5,14 +5,11 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
 #![cfg(feature = "html")]
 
 use std::cell::Cell;
 
-use super::common::{
-    MENTION_URL_PREFIX, Segment, after, before, inject_into_message, telegram_string_len,
-};
-use crate::update_entity_len;
 use grammers_tl_types as tl;
 use html5ever::local_name as tag;
 use html5ever::tendril::StrTendril;
@@ -20,8 +17,16 @@ use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
 };
 
+use super::common::{
+    MENTION_URL_PREFIX, Segment, after, before, inject_into_message, telegram_string_len,
+    update_entity_len,
+};
+
 const CODE_LANG_PREFIX: &str = "language-";
 
+/// Parse a message containing HTML tags into plain text and the list of formatting entities understood by Telegram.
+///
+/// This is not the same as the HTML understood by Telegram's HTTP Bot API.
 pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntity>) {
     struct Sink {
         text: Cell<String>,
@@ -217,6 +222,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
     (text.take(), entities.take())
 }
 
+/// Combine plain text and the list of formatting entities understood by Telegram into HTML.
 pub fn generate_html_message(message: &str, entities: &[tl::enums::MessageEntity]) -> String {
     use grammers_tl_types::enums::MessageEntity as ME;
 

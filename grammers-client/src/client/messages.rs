@@ -7,18 +7,21 @@
 // except according to those terms.
 
 //! Methods related to sending messages.
-use crate::types::{InputReactions, IterBuffer, Message};
-use crate::utils::{generate_random_id, generate_random_ids};
-use crate::{Client, InputMedia, PeerMap, types};
+
+use std::collections::HashMap;
+
 use chrono::{DateTime, FixedOffset};
 use grammers_mtsender::InvocationError;
-use grammers_session::types::{PeerId, PeerKind, PeerRef};
-use grammers_tl_types as tl;
+use grammers_session::types::{PeerAuth, PeerId, PeerKind, PeerRef};
+use grammers_tl_types::{self as tl, enums::InputPeer};
 use log::{Level, log_enabled, warn};
-use std::collections::HashMap;
-use tl::enums::InputPeer;
 
-fn map_random_ids_to_messages(
+use super::{Client, IterBuffer};
+use crate::media::{InputMedia, Media};
+use crate::message::{InputMessage, InputReactions, Message};
+use crate::utils::{generate_random_id, generate_random_ids};
+
+async fn map_random_ids_to_messages(
     client: &Client,
     fetched_in: PeerRef,
     random_ids: &[i64],
@@ -32,8 +35,7 @@ fn map_random_ids_to_messages(
             date: _,
             seq: _,
         }) => {
-            let peers = PeerMap::new(users, chats);
-            client.cache_peers_maybe(&peers);
+            let peers = client.build_peer_map(users, chats).await;
 
             let rnd_to_id = updates
                 .iter()
@@ -60,7 +62,9 @@ fn map_random_ids_to_messages(
                     ) => Some(message),
                     _ => None,
                 })
-                .map(|message| Message::from_raw(client, message, Some(fetched_in.clone()), &peers))
+                .map(|message| {
+                    Message::from_raw(client, message, Some(fetched_in.clone()), peers.handle())
+                })
                 .map(|message| (message.id(), message))
                 .collect::<HashMap<_, _>>();
 
@@ -86,7 +90,7 @@ fn map_random_ids_to_messages(
     }
 }
 
-pub(crate) fn parse_mention_entities(
+pub(crate) async fn parse_mention_entities(
     client: &Client,
     mut entities: Vec<tl::enums::MessageEntity>,
 ) -> Option<Vec<tl::enums::MessageEntity>> {
@@ -109,7 +113,8 @@ pub(crate) fn parse_mention_entities(
                             .0
                             .session
                             .peer(PeerId::user(mention_name.user_id))
-                            .map(|peer| peer.auth())
+                            .await
+                            .and_then(|peer| peer.auth())
                             .unwrap_or_default()
                             .hash(),
                     }),
@@ -182,20 +187,20 @@ impl<R: tl::RemoteCall<Return = tl::enums::messages::Messages>> IterBuffer<R, Me
             }
         };
 
-        let peers = PeerMap::new(users, chats);
-        self.client.cache_peers_maybe(&peers);
+        let peers = self.client.build_peer_map(users, chats).await;
 
         let client = self.client.clone();
         self.buffer.extend(
             messages
                 .into_iter()
-                .map(|message| Message::from_raw(&client, message, peer, &peers)),
+                .map(|message| Message::from_raw(&client, message, peer, peers.handle())),
         );
 
         Ok(rate)
     }
 }
 
+/// Iterator returned by [`Client::iter_messages`].
 pub type MessageIter = IterBuffer<tl::functions::messages::GetHistory, Message>;
 
 impl MessageIter {
@@ -216,11 +221,13 @@ impl MessageIter {
         )
     }
 
+    /// Changes the message identifier upper bound.
     pub fn offset_id(mut self, offset: i32) -> Self {
         self.request.offset_id = offset;
         self
     }
 
+    /// Changes the message send date upper bound.
     pub fn max_date(mut self, offset: i32) -> Self {
         self.request.offset_date = offset;
         self
@@ -234,7 +241,7 @@ impl MessageIter {
         self.get_total().await
     }
 
-    /// Return the next `Message` from the internal buffer, filling the buffer previously if it's
+    /// Returns the next `Message` from the internal buffer, filling the buffer previously if it's
     /// empty.
     ///
     /// Returns `None` if the `limit` is reached or there are no messages left.
@@ -258,6 +265,7 @@ impl MessageIter {
     }
 }
 
+/// Iterator returned by [`Client::search_messages`].
 pub type SearchIter = IterBuffer<tl::functions::messages::Search, Message>;
 
 impl SearchIter {
@@ -286,6 +294,7 @@ impl SearchIter {
         )
     }
 
+    /// Changes the message identifier upper bound.
     pub fn offset_id(mut self, offset: i32) -> Self {
         self.request.offset_id = offset;
         self
@@ -383,6 +392,7 @@ impl SearchIter {
     }
 }
 
+/// Iterator returned by [`Client::search_all_messages`].
 pub type GlobalSearchIter = IterBuffer<tl::functions::messages::SearchGlobal, Message>;
 
 impl GlobalSearchIter {
@@ -408,6 +418,7 @@ impl GlobalSearchIter {
         )
     }
 
+    /// Changes the message identifier upper bound.
     pub fn offset_id(mut self, offset: i32) -> Self {
         self.request.offset_id = offset;
         self
@@ -451,7 +462,11 @@ impl GlobalSearchIter {
         if !self.last_chunk && !self.buffer.is_empty() {
             let last = &self.buffer[self.buffer.len() - 1];
             self.request.offset_rate = offset_rate.unwrap_or(0);
-            self.request.offset_peer = last.peer_ref().into();
+            self.request.offset_peer = last
+                .peer_ref()
+                .await
+                .map(|peer| peer.into())
+                .unwrap_or(tl::enums::InputPeer::Empty);
             self.request.offset_id = last.id();
         }
 
@@ -479,15 +494,13 @@ impl Client {
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client.send_message(peer, "Boring text message :-(").await?;
     ///
-    /// use grammers_client::InputMessage;
+    /// use grammers_client::message::InputMessage;
     ///
     /// client.send_message(peer, InputMessage::new().text("Sneaky message").silent(true)).await?;
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// [`InputMessage`]: crate::InputMessage
-    pub async fn send_message<C: Into<PeerRef>, M: Into<types::InputMessage>>(
+    pub async fn send_message<C: Into<PeerRef>, M: Into<InputMessage>>(
         &self,
         peer: C,
         message: M,
@@ -495,7 +508,7 @@ impl Client {
         let peer = peer.into();
         let message = message.into();
         let random_id = generate_random_id();
-        let entities = parse_mention_entities(self, message.entities.clone());
+        let entities = parse_mention_entities(self, message.entities.clone()).await;
         let updates = if let Some(media) = message.media.clone() {
             self.invoke(&tl::functions::messages::SendMedia {
                 silent: message.silent,
@@ -576,7 +589,7 @@ impl Client {
             tl::enums::Updates::UpdateShortSentMessage(updates) => {
                 let peer = if peer.id.kind() == PeerKind::UserSelf {
                     // from_raw_short_updates needs the peer ID
-                    self.0.session.peer(peer.id).unwrap().into()
+                    self.0.session.peer_ref(peer.id).await.unwrap()
                 } else {
                     peer
                 };
@@ -591,6 +604,7 @@ impl Client {
                 };
 
                 match map_random_ids_to_messages(self, peer, &[random_id], updates)
+                    .await
                     .pop()
                     .flatten()
                 {
@@ -609,7 +623,7 @@ impl Client {
                                 peer_id: Some(peer.id.into()),
                             }),
                             Some(peer),
-                            &PeerMap::empty(),
+                            self.empty_peer_map(),
                         )
                     }
                 }
@@ -632,14 +646,12 @@ impl Client {
     ///
     /// ```
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
-    /// use grammers_client::InputMedia;
+    /// use grammers_client::media::InputMedia;
     ///
     /// client.send_album(peer, vec![InputMedia::new().caption("A album").photo_url("https://example.com/cat.jpg")]).await?;
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// [`InputMedia`]: crate::InputMedia
     pub async fn send_album<C: Into<PeerRef>>(
         &self,
         peer: C,
@@ -667,7 +679,7 @@ impl Client {
                     })
                     .await?;
                 media.media = Some(
-                    types::Media::from_raw(uploaded)
+                    Media::from_raw(uploaded)
                         .unwrap()
                         .to_raw_input_media()
                         .unwrap(),
@@ -675,7 +687,21 @@ impl Client {
             }
         }
 
-        let first_media = medias.first().unwrap();
+        let first_media_reply = medias.first().unwrap().reply_to;
+
+        let mut multi_media = Vec::with_capacity(medias.len());
+        for (input_media, random_id) in medias.into_iter().zip(random_ids.iter()) {
+            let entities = parse_mention_entities(self, input_media.entities).await;
+            let raw_media = input_media.media.unwrap();
+            multi_media.push(tl::enums::InputSingleMedia::Media(
+                tl::types::InputSingleMedia {
+                    media: raw_media,
+                    random_id: *random_id,
+                    message: input_media.caption,
+                    entities,
+                },
+            ))
+        }
 
         let updates = self
             .invoke(&tl::functions::messages::SendMultiMedia {
@@ -683,7 +709,7 @@ impl Client {
                 background: false,
                 clear_draft: false,
                 peer: peer.into(),
-                reply_to: first_media.reply_to.map(|reply_to_msg_id| {
+                reply_to: first_media_reply.map(|reply_to_msg_id| {
                     tl::types::InputReplyToMessage {
                         reply_to_msg_id,
                         top_msg_id: None,
@@ -697,21 +723,7 @@ impl Client {
                     .into()
                 }),
                 schedule_date: None,
-                multi_media: medias
-                    .into_iter()
-                    .zip(random_ids.iter())
-                    .map(|(input_media, random_id)| {
-                        let entities = parse_mention_entities(self, input_media.entities);
-                        let raw_media = input_media.media.unwrap();
-
-                        tl::enums::InputSingleMedia::Media(tl::types::InputSingleMedia {
-                            media: raw_media,
-                            random_id: *random_id,
-                            message: input_media.caption,
-                            entities,
-                        })
-                    })
-                    .collect(),
+                multi_media,
                 send_as: None,
                 noforwards: false,
                 update_stickersets_order: false,
@@ -723,7 +735,7 @@ impl Client {
             })
             .await?;
 
-        Ok(map_random_ids_to_messages(self, peer, &random_ids, updates))
+        Ok(map_random_ids_to_messages(self, peer, &random_ids, updates).await)
     }
 
     /// Edits an existing message.
@@ -742,17 +754,14 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// [`InputMessage`]: crate::InputMessage
-    // TODO don't require nasty InputPeer
-    pub async fn edit_message<C: Into<PeerRef>, M: Into<types::InputMessage>>(
+    pub async fn edit_message<C: Into<PeerRef>, M: Into<InputMessage>>(
         &self,
         peer: C,
         message_id: i32,
         new_message: M,
     ) -> Result<(), InvocationError> {
         let new_message = new_message.into();
-        let entities = parse_mention_entities(self, new_message.entities);
+        let entities = parse_mention_entities(self, new_message.entities).await;
         self.invoke(&tl::functions::messages::EditMessage {
             no_webpage: !new_message.link_preview,
             invert_media: new_message.invert_media,
@@ -773,9 +782,9 @@ impl Client {
 
     /// Deletes up to 100 messages in a peer.
     ///
-    /// <div class="stab unstable">
+    /// <div class="warning">
     ///
-    /// **Warning**: when deleting messages from small group peers or private conversations, this
+    /// When deleting messages from small group peers or private conversations, this
     /// method cannot validate that the provided message IDs actually belong to the input peer due
     /// to the way Telegram's API works. Make sure to pass correct [`Message::id`]'s.
     ///
@@ -881,12 +890,7 @@ impl Client {
             suggested_post: None,
         };
         let result = self.invoke(&request).await?;
-        Ok(map_random_ids_to_messages(
-            self,
-            peer.into(),
-            &request.random_id,
-            result,
-        ))
+        Ok(map_random_ids_to_messages(self, peer.into(), &request.random_id, result).await)
     }
 
     /// Gets the [`Message`] to which the input message is replying to.
@@ -896,7 +900,7 @@ impl Client {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(message: grammers_client::types::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(message: grammers_client::message::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if let Some(reply) = client.get_reply_to_message(&message).await? {
     ///     println!("The reply said: {}", reply.text());
     /// }
@@ -930,7 +934,14 @@ impl Client {
         }
 
         // TODO shouldn't this method take in a message id anyway?
-        let peer = message.peer_ref();
+        let peer_id = message.peer_id();
+        let peer = match peer_id.kind() {
+            PeerKind::User | PeerKind::UserSelf | PeerKind::Chat => PeerRef {
+                id: peer_id,
+                auth: PeerAuth::default(), // unused, so no need to bother fetching it
+            },
+            PeerKind::Channel => message.peer_ref().await.ok_or(InvocationError::Dropped)?,
+        };
         let reply_to_message_id = match message.reply_to_message_id() {
             Some(id) => id,
             None => return Ok(None),
@@ -960,13 +971,12 @@ impl Client {
             }
         };
 
-        let peers = PeerMap::new(users, chats);
-        self.cache_peers_maybe(&peers);
+        let peers = self.build_peer_map(users, chats).await;
         Ok(messages
             .into_iter()
-            .map(|m| Message::from_raw(self, m, Some(peer.into()), &peers))
+            .map(|m| Message::from_raw(self, m, Some(peer.into()), peers.handle()))
             .next()
-            .filter(|m| !filter_req || m.peer_ref().id == message.peer_ref().id))
+            .filter(|m| !filter_req || m.peer_id() == message.peer_id()))
     }
 
     /// Iterate over the message history of a peer, from most recent to oldest.
@@ -1082,12 +1092,11 @@ impl Client {
             }
         };
 
-        let peers = PeerMap::new(users, chats);
-        self.cache_peers_maybe(&peers);
+        let peers = self.build_peer_map(users, chats).await;
         let mut map = messages
             .into_iter()
-            .map(|m| Message::from_raw(self, m, Some(peer.into()), &peers))
-            .filter(|m| m.peer_ref().id == peer.id)
+            .map(|m| Message::from_raw(self, m, Some(peer.into()), peers.handle()))
+            .filter(|m| m.peer_id() == peer.id)
             .map(|m| (m.id(), m))
             .collect::<HashMap<_, _>>();
 
@@ -1136,12 +1145,11 @@ impl Client {
             }
         };
 
-        let peers = PeerMap::new(users, chats);
-        self.cache_peers_maybe(&peers);
+        let peers = self.build_peer_map(users, chats).await;
         Ok(messages
             .into_iter()
-            .map(|m| Message::from_raw(self, m, Some(peer.into()), &peers))
-            .find(|m| m.peer_ref().id == peer.id))
+            .map(|m| Message::from_raw(self, m, Some(peer.into()), peers.handle()))
+            .find(|m| m.peer_id() == peer.id))
     }
 
     /// Pin a message in the peer. This will not notify any users.
@@ -1242,7 +1250,7 @@ impl Client {
     ///
     /// ```
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
-    /// use grammers_client::types::InputReactions;
+    /// use grammers_client::message::InputReactions;
     ///
     /// let message_id = 123;
     /// let reactions = InputReactions::emoticon("🤯").big().add_to_recent();
@@ -1256,7 +1264,7 @@ impl Client {
     ///
     /// ```
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
-    /// use grammers_client::types::InputReactions;
+    /// use grammers_client::message::InputReactions;
     ///
     /// let message_id = 123;
     ///

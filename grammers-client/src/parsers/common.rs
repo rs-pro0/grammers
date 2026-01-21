@@ -5,6 +5,7 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
 #![cfg(any(feature = "markdown", feature = "html"))]
 
 use std::cmp::Ordering;
@@ -29,7 +30,6 @@ pub fn telegram_string_len(string: &str) -> i32 {
 /// push_entity!(MessageEntityBold(1) => vec);
 /// update_entity_len!(MessageEntityBold(2) => vec);
 /// ```
-#[macro_export]
 macro_rules! update_entity_len {
     ( $ty:ident($end_offset:expr) in $vector:expr ) => {
         let mut remove = false;
@@ -48,6 +48,7 @@ macro_rules! update_entity_len {
         }
     };
 }
+pub(crate) use update_entity_len;
 
 /// Represents the edge before or after a position.
 /// Note that `After` sorts first, because it must be applied before the next `Before`.

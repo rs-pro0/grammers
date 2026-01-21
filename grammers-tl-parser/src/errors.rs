@@ -9,11 +9,12 @@
 //! Errors that can occur during the parsing of [Type Language] definitions.
 //!
 //! [Type Language]: https://core.telegram.org/mtproto/TL
+
 use std::num::ParseIntError;
 
 /// The error type for the parsing operation of [`Definition`]s.
 ///
-/// [`Definition`]: tl/struct.Definition.html
+/// [`Definition`]: crate::Definition
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     /// The definition is empty.
@@ -40,7 +41,7 @@ pub enum ParseError {
 
 /// The error type for the parsing operation of [`Parameter`]s.
 ///
-/// [`Parameter`]: tl/struct.Parameter.html
+/// [`Parameter`]: crate::tl::Parameter
 #[derive(Debug, PartialEq)]
 pub enum ParamParseError {
     /// The parameter was empty.

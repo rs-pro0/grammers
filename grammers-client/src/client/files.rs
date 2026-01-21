@@ -6,28 +6,26 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::Client;
-use crate::types::{Downloadable, Uploaded};
-use crate::utils::generate_random_id;
+use std::mem;
+use std::sync::Arc;
+#[cfg(feature = "fs")]
+use std::{io::SeekFrom, path::Path};
+
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use grammers_mtsender::InvocationError;
 use grammers_tl_types as tl;
-use std::mem;
-use std::sync::Arc;
+use tokio::io::{self, AsyncRead, AsyncReadExt};
+use tokio::sync::Mutex as AsyncMutex;
+#[cfg(feature = "fs")]
 use tokio::{
-    io::{self, AsyncRead, AsyncReadExt},
-    sync::Mutex as AsyncMutex,
+    fs,
+    io::{AsyncSeekExt, AsyncWriteExt},
+    sync::mpsc::unbounded_channel,
 };
 
-#[cfg(feature = "fs")]
-use {
-    std::{io::SeekFrom, path::Path},
-    tokio::{
-        fs,
-        io::{AsyncSeekExt, AsyncWriteExt},
-        sync::mpsc::unbounded_channel,
-    },
-};
+use super::Client;
+use crate::media::{Downloadable, Uploaded};
+use crate::utils::generate_random_id;
 
 pub const MIN_CHUNK_SIZE: i32 = 4 * 1024;
 pub const MAX_CHUNK_SIZE: i32 = 512 * 1024;
@@ -35,6 +33,7 @@ const FILE_MIGRATE_ERROR: i32 = 303;
 const BIG_FILE_SIZE: usize = 10 * 1024 * 1024;
 const WORKER_COUNT: usize = 4;
 
+/// Iterator returned by [`Client::iter_download`].
 pub struct DownloadIter {
     client: Client,
     done: bool,
@@ -143,7 +142,7 @@ impl Client {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(downloadable: grammers_client::types::Media, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(downloadable: grammers_client::media::Media, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut file_bytes = Vec::new();
     /// let mut download = client.iter_download(&downloadable);
     ///
@@ -196,7 +195,7 @@ impl Client {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(downloadable: grammers_client::types::Media, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(downloadable: grammers_client::media::Media, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client.download_media(&downloadable, "/home/username/photos/holidays.jpg").await?;
     /// # Ok(())
     /// # }
@@ -365,7 +364,7 @@ impl Client {
     ///
     /// ```
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client, some_vec: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// use grammers_client::InputMessage;
+    /// use grammers_client::message::InputMessage;
     ///
     /// // In-memory `Vec<u8>` buffers can be used as async streams
     /// let size = some_vec.len();
@@ -377,7 +376,7 @@ impl Client {
     /// # }
     /// ```
     ///
-    /// [`InputMessage`]: crate::types::InputMessage
+    /// [`InputMessage`]: crate::message::InputMessage
     pub async fn upload_stream<S: AsyncRead + Unpin>(
         &self,
         stream: &mut S,
@@ -483,7 +482,7 @@ impl Client {
     ///
     /// ```
     /// # async fn f(peer: grammers_session::types::PeerRef, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
-    /// use grammers_client::InputMessage;
+    /// use grammers_client::message::InputMessage;
     ///
     /// let uploaded_file = client.upload_file("/home/username/photos/holidays.jpg").await?;
     ///
@@ -492,7 +491,7 @@ impl Client {
     /// # }
     /// ```
     ///
-    /// [`InputMessage`]: crate::InputMessage
+    /// [`InputMessage`]: crate::message::InputMessage
     #[cfg(feature = "fs")]
     pub async fn upload_file<P: AsRef<Path>>(&self, path: P) -> Result<Uploaded, io::Error> {
         let path = path.as_ref();

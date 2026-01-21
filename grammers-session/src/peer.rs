@@ -254,12 +254,12 @@ impl PeerInfo {
         }
     }
 
-    /// Returns the `PeerAuth` stored in this info, or [`PeerAuth::default()`] if that info is not known.
-    pub fn auth(&self) -> PeerAuth {
+    /// Returns the `PeerAuth` stored in this info.
+    pub fn auth(&self) -> Option<PeerAuth> {
         match self {
-            PeerInfo::User { auth, .. } => auth.unwrap_or_default(),
-            PeerInfo::Chat { .. } => PeerAuth::default(),
-            PeerInfo::Channel { auth, .. } => auth.unwrap_or_default(),
+            PeerInfo::User { auth, .. } => *auth,
+            PeerInfo::Chat { .. } => Some(PeerAuth::default()),
+            PeerInfo::Channel { auth, .. } => *auth,
         }
     }
 }
@@ -267,21 +267,6 @@ impl PeerInfo {
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.bot_api_dialog_id().fmt(f)
-    }
-}
-
-impl From<PeerInfo> for PeerRef {
-    #[inline]
-    fn from(peer: PeerInfo) -> Self {
-        <Self as From<&PeerInfo>>::from(&peer)
-    }
-}
-impl<'a> From<&'a PeerInfo> for PeerRef {
-    fn from(peer: &'a PeerInfo) -> Self {
-        Self {
-            id: peer.id(),
-            auth: peer.auth(),
-        }
     }
 }
 

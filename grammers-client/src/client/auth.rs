@@ -5,25 +5,37 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::Client;
-use crate::types::{LoginToken, PasswordToken, TermsOfService, User};
-use crate::utils;
+
+use std::fmt;
+
 use grammers_crypto::two_factor_auth::{calculate_2fa, check_p_and_g};
-pub use grammers_mtsender::InvocationError;
+use grammers_mtsender::InvocationError;
 use grammers_session::types::{PeerInfo, UpdateState, UpdatesState};
 use grammers_tl_types as tl;
-use std::fmt;
+
+use super::Client;
+use crate::peer::User;
+use crate::utils;
 
 /// The error type which is returned when signing in fails.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum SignInError {
-    SignUpRequired {
-        terms_of_service: Option<TermsOfService>,
-    },
+    /// Sign-up with an official client is required.
+    ///
+    /// Third-party applications, such as those developed with *grammers*,
+    /// cannot be used to register new accounts. For more details, see this
+    /// [comment regarding third-party app sign-ups](https://bugs.telegram.org/c/25410/1):
+    /// > \[…] if a user doesn’t have a Telegram account yet,
+    /// > they will need to create one first using an official mobile Telegram app.
+    SignUpRequired,
+    /// The account has 2FA enabled, and the password is required.
     PasswordRequired(PasswordToken),
+    /// The code used to complete login was not valid.
     InvalidCode,
-    InvalidPassword,
+    /// The 2FA password used to complete login was not valid.
+    InvalidPassword(PasswordToken),
+    /// A generic invocation error occured.
     Other(InvocationError),
 }
 
@@ -31,21 +43,38 @@ impl fmt::Display for SignInError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use SignInError::*;
         match self {
-            SignUpRequired {
-                terms_of_service: tos,
-            } => write!(
-                f,
-                "sign in error: sign up with official client required: {tos:?}"
-            ),
+            SignUpRequired => write!(f, "sign in error: sign up with official client required"),
             PasswordRequired(_password) => write!(f, "2fa password required"),
             InvalidCode => write!(f, "sign in error: invalid code"),
-            InvalidPassword => write!(f, "invalid password"),
+            InvalidPassword(_password) => write!(f, "invalid password"),
             Other(e) => write!(f, "sign in error: {e}"),
         }
     }
 }
 
 impl std::error::Error for SignInError {}
+
+/// Login token needed to continue the login process after sending the code.
+pub struct LoginToken {
+    pub(crate) phone: String,
+    pub(crate) phone_code_hash: String,
+}
+
+/// Password token needed to complete a 2FA login.
+#[derive(Debug)]
+pub struct PasswordToken {
+    pub(crate) password: tl::types::account::Password,
+}
+
+impl PasswordToken {
+    pub fn new(password: tl::types::account::Password) -> Self {
+        PasswordToken { password }
+    }
+
+    pub fn hint(&self) -> Option<&str> {
+        self.password.hint.as_deref()
+    }
+}
 
 /// Method implementations related with the authentication of the user into the API.
 ///
@@ -87,14 +116,18 @@ impl Client {
         // `message_box` will try to correct its state as updates arrive.
         let update_state = self.invoke(&tl::functions::updates::GetState {}).await.ok();
 
-        let user = User::from_raw(auth.user);
+        let user = User::from_raw(self, auth.user);
+        let auth = user.to_ref().await.unwrap().auth;
 
-        self.0.session.cache_peer(&PeerInfo::User {
-            id: user.bare_id(),
-            auth: Some(user.auth()),
-            bot: Some(user.is_bot()),
-            is_self: Some(true),
-        });
+        self.0
+            .session
+            .cache_peer(&PeerInfo::User {
+                id: user.id().bare_id(),
+                auth: Some(auth),
+                bot: Some(user.is_bot()),
+                is_self: Some(true),
+            })
+            .await;
         if let Some(tl::enums::updates::State::State(state)) = update_state {
             self.0
                 .session
@@ -104,7 +137,8 @@ impl Client {
                     date: state.date,
                     seq: state.seq,
                     channels: Vec::new(),
-                }));
+                }))
+                .await;
         }
 
         Ok(user)
@@ -114,9 +148,10 @@ impl Client {
     ///
     /// This is the method you need to call to use the client under a bot account.
     ///
-    /// It is recommended to save the session on successful login, and if saving
-    /// fails, it is recommended to [`Client::sign_out`]. If the session cannot be saved, then the
-    /// authorization will be "lost" in the list of logged-in clients, since it is unaccessible.
+    /// It is recommended to save the session on successful login. Some session storages will do this
+    /// automatically. If saving fails, it is recommended to [`Client::sign_out`]. If the session is never
+    /// saved post-login, then the authorization will be "lost" in the list of logged-in clients, since it
+    /// is unaccessible.
     ///
     /// # Examples
     ///
@@ -162,7 +197,7 @@ impl Client {
                 // This also gives a chance for the new home DC to export its authorization
                 // if there's a need to connect back to the old DC after having logged in.
                 self.0.handle.disconnect_from_dc(old_dc_id);
-                self.0.session.set_home_dc_id(new_dc_id);
+                self.0.session.set_home_dc_id(new_dc_id).await;
                 self.invoke(&request).await?
             }
             Err(e) => return Err(e.into()),
@@ -233,7 +268,7 @@ impl Client {
             Ok(x) => match x {
                 SC::Code(code) => code,
                 SC::Success(_) => panic!("should not have logged in yet"),
-                SC::PaymentRequired(_) => todo!(),
+                SC::PaymentRequired(_) => unimplemented!(),
             },
             Err(InvocationError::Rpc(err)) if err.code == 303 => {
                 let old_dc_id = self.0.session.home_dc_id();
@@ -242,11 +277,11 @@ impl Client {
                 // This also gives a chance for the new home DC to export its authorization
                 // if there's a need to connect back to the old DC after having logged in.
                 self.0.handle.disconnect_from_dc(old_dc_id);
-                self.0.session.set_home_dc_id(new_dc_id);
+                self.0.session.set_home_dc_id(new_dc_id).await;
                 match self.invoke(&request).await? {
                     SC::Code(code) => code,
                     SC::Success(_) => panic!("should not have logged in yet"),
-                    SC::PaymentRequired(_) => todo!(),
+                    SC::PaymentRequired(_) => unimplemented!(),
                 }
             }
             Err(e) => return Err(e.into()),
@@ -263,9 +298,10 @@ impl Client {
     /// You must call [`Client::request_login_code`] before using this method in order to obtain
     /// necessary login token, and also have asked the user for the login code.
     ///
-    /// It is recommended to save the session on successful login, and if saving
-    /// fails, it is recommended to [`Client::sign_out`]. If the session cannot be saved, then the
-    /// authorization will be "lost" in the list of logged-in clients, since it is unaccessible.
+    /// It is recommended to save the session on successful login. Some session storages will do this
+    /// automatically. If saving fails, it is recommended to [`Client::sign_out`]. If the session is never
+    /// saved post-login, then the authorization will be "lost" in the list of logged-in clients, since it
+    /// is unaccessible.
     ///
     /// # Examples
     ///
@@ -285,7 +321,7 @@ impl Client {
     /// let user = match client.sign_in(&token, &code).await {
     ///     Ok(user) => user,
     ///     Err(SignInError::PasswordRequired(_token)) => panic!("Please provide a password"),
-    ///     Err(SignInError::SignUpRequired { terms_of_service: tos }) => panic!("Sign up required"),
+    ///     Err(SignInError::SignUpRequired) => panic!("Sign up required"),
     ///     Err(err) => {
     ///         println!("Failed to sign in as a user :(\n{}", err);
     ///         return Err(err.into());
@@ -313,10 +349,8 @@ impl Client {
             Ok(tl::enums::auth::Authorization::Authorization(x)) => {
                 self.complete_login(x).await.map_err(SignInError::Other)
             }
-            Ok(tl::enums::auth::Authorization::SignUpRequired(x)) => {
-                Err(SignInError::SignUpRequired {
-                    terms_of_service: x.terms_of_service.map(TermsOfService::from_raw),
-                })
+            Ok(tl::enums::auth::Authorization::SignUpRequired(_)) => {
+                Err(SignInError::SignUpRequired)
             }
             Err(err) if err.is("SESSION_PASSWORD_NEEDED") => {
                 let password_token = self.get_password_information().await;
@@ -385,7 +419,7 @@ impl Client {
         password: impl AsRef<[u8]>,
     ) -> Result<User, SignInError> {
         let mut password_info = password_token.password;
-        let current_algo = password_info.current_algo.unwrap();
+        let current_algo = password_info.current_algo.clone().unwrap();
         let mut params = utils::extract_password_parameters(&current_algo);
 
         // Telegram sent us incorrect parameters, trying to get them again
@@ -404,14 +438,14 @@ impl Client {
 
         let (salt1, salt2, p, g) = params;
 
-        let g_b = password_info.srp_b.unwrap();
-        let a: Vec<u8> = password_info.secure_random;
+        let g_b = password_info.srp_b.clone().unwrap();
+        let a = password_info.secure_random.clone();
 
         let (m1, g_a) = calculate_2fa(salt1, salt2, p, g, g_b, a, password);
 
         let check_password = tl::functions::auth::CheckPassword {
             password: tl::enums::InputCheckPasswordSrp::Srp(tl::types::InputCheckPasswordSrp {
-                srp_id: password_info.srp_id.unwrap(),
+                srp_id: password_info.srp_id.clone().unwrap(),
                 a: g_a.to_vec(),
                 m1: m1.to_vec(),
             }),
@@ -422,7 +456,11 @@ impl Client {
                 self.complete_login(x).await.map_err(SignInError::Other)
             }
             Ok(tl::enums::auth::Authorization::SignUpRequired(_x)) => panic!("Unexpected result"),
-            Err(err) if err.is("PASSWORD_HASH_INVALID") => Err(SignInError::InvalidPassword),
+            Err(err) if err.is("PASSWORD_HASH_INVALID") => {
+                Err(SignInError::InvalidPassword(PasswordToken {
+                    password: password_info,
+                }))
+            }
             Err(error) => Err(SignInError::Other(error)),
         }
     }

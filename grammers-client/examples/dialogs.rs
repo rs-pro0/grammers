@@ -10,15 +10,14 @@
 //! cargo run --example dialogs
 //! ```
 
-#![allow(deprecated)]
+use std::env;
+use std::io::{self, BufRead as _, Write as _};
+use std::sync::Arc;
 
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use simple_logger::SimpleLogger;
-use std::env;
-use std::io::{self, BufRead as _, Write as _};
-use std::sync::Arc;
 use tokio::runtime;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -47,11 +46,10 @@ async fn async_main() -> Result<()> {
 
     let api_id = env!("TG_ID").parse().expect("TG_ID invalid");
 
-    let session = Arc::new(SqliteSession::open(SESSION_FILE)?);
+    let session = Arc::new(SqliteSession::open(SESSION_FILE).await?);
 
-    let pool = SenderPool::new(Arc::clone(&session), api_id);
-    let client = Client::new(&pool);
-    let SenderPool { runner, .. } = pool;
+    let SenderPool { runner, handle, .. } = SenderPool::new(Arc::clone(&session), api_id);
+    let client = Client::new(handle);
     let _ = tokio::spawn(runner.run());
 
     if !client.is_authorized().await? {
